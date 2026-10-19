@@ -6,18 +6,23 @@ import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync }
 import { homedir, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { Agent } from "@earendil-works/pi-agent-core";
-import { getModel, type OAuthCredentials, type OAuthProvider } from "@earendil-works/pi-ai";
+import { getModel, type OAuthCredentials, type OAuthProvider } from "@earendil-works/pi-ai/compat";
 import { getOAuthApiKey } from "@earendil-works/pi-ai/oauth";
-import { AgentSession } from "../src/core/agent-session.js";
-import { AuthStorage } from "../src/core/auth-storage.js";
-import { createEventBus } from "../src/core/event-bus.js";
-import type { Extension, ExtensionFactory, LoadExtensionsResult } from "../src/core/extensions/index.js";
-import { createExtensionRuntime, loadExtensionFromFactory } from "../src/core/extensions/loader.js";
-import { ModelRegistry } from "../src/core/model-registry.js";
-import type { ResourceLoader } from "../src/core/resource-loader.js";
-import { SessionManager } from "../src/core/session-manager.js";
-import { SettingsManager } from "../src/core/settings-manager.js";
-import { createCodingTools } from "../src/index.js";
+import { AgentSession } from "../src/core/agent-session.ts";
+import { AuthStorage } from "../src/core/auth-storage.ts";
+import { createEventBus } from "../src/core/event-bus.ts";
+import type {
+	Extension,
+	ExtensionFactory,
+	InlineExtension,
+	LoadExtensionsResult,
+} from "../src/core/extensions/index.ts";
+import { createExtensionRuntime, loadExtensionFromFactory } from "../src/core/extensions/loader.ts";
+import { ModelRegistry } from "../src/core/model-registry.ts";
+import type { ResourceLoader } from "../src/core/resource-loader.ts";
+import { SessionManager } from "../src/core/session-manager.ts";
+import { SettingsManager } from "../src/core/settings-manager.ts";
+import { createCodingTools } from "../src/index.ts";
 
 /**
  * API key for authenticated tests. Tests using this should be wrapped in
@@ -181,8 +186,10 @@ export interface CreateTestExtensionsResultInput {
 	path?: string;
 }
 
+type TestExtensionInput = InlineExtension | CreateTestExtensionsResultInput;
+
 export async function createTestExtensionsResult(
-	inputs: Array<ExtensionFactory | CreateTestExtensionsResultInput>,
+	inputs: TestExtensionInput[],
 	cwd = process.cwd(),
 ): Promise<LoadExtensionsResult> {
 	const runtime = createExtensionRuntime();
@@ -190,9 +197,12 @@ export async function createTestExtensionsResult(
 	const extensions: Extension[] = [];
 
 	for (const [index, input] of inputs.entries()) {
-		const factory = typeof input === "function" ? input : input.factory;
-		const extensionPath =
-			typeof input === "function" ? `<inline:${index + 1}>` : (input.path ?? `<inline:${index + 1}>`);
+		const isObject = typeof input !== "function";
+		const hasName = isObject && "name" in input;
+		const hasPath = isObject && "path" in input && typeof input.path === "string" && input.path !== "";
+		const factory = isObject ? input.factory : input;
+		const extensionPath = hasName ? `<inline:${input.name}>` : hasPath ? input.path : `<inline:${index + 1}>`;
+
 		extensions.push(await loadExtensionFromFactory(factory, cwd, eventBus, runtime, extensionPath));
 	}
 

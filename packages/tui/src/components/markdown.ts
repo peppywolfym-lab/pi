@@ -1,7 +1,7 @@
 import { Marked, type Token, Tokenizer, type Tokens } from "marked";
-import { getCapabilities, hyperlink, isImageLine } from "../terminal-image.js";
-import type { Component } from "../tui.js";
-import { applyBackgroundToLine, visibleWidth, wrapTextWithAnsi } from "../utils.js";
+import { getCapabilities, hyperlink, isImageLine } from "../terminal-image.ts";
+import type { Component } from "../tui.ts";
+import { applyBackgroundToLine, visibleWidth, wrapTextWithAnsi } from "../utils.ts";
 
 const STRICT_STRIKETHROUGH_REGEX = /^(~~)(?=[^\s~])((?:\\.|[^\\])*?(?:\\.|[^\s~\\]))\1(?=[^~]|$)/;
 
@@ -20,6 +20,31 @@ class StrictStrikethroughTokenizer extends Tokenizer {
 			tokens: this.lexer.inlineTokens(text),
 		};
 	}
+}
+
+function trimPartialClosingFences(tokens: readonly Token[]): void {
+	const token = tokens[tokens.length - 1];
+	if (token?.type === "list") {
+		trimPartialClosingFences(token.items[token.items.length - 1]?.tokens ?? []);
+		return;
+	}
+	if (token?.type === "blockquote") {
+		trimPartialClosingFences(token.tokens ?? []);
+		return;
+	}
+	if (token?.type !== "code") {
+		return;
+	}
+
+	// Trim streamed partial closing fences so code blocks do not shrink/flicker
+	// when the final fence character arrives. See https://github.com/earendil-works/pi/issues/5825.
+	const marker = /^(`{3,}|~{3,})/.exec(token.raw)?.[1];
+	const lastLine = token.raw.split("\n").pop();
+	if (!marker || !lastLine || lastLine.length >= marker.length || lastLine !== marker[0]?.repeat(lastLine.length)) {
+		return;
+	}
+
+	token.text = token.text.slice(0, -lastLine.length).replace(/\n$/, "");
 }
 
 const markdownParser = new Marked();
@@ -70,6 +95,13 @@ export interface MarkdownTheme {
 	codeBlockIndent?: string;
 }
 
+export interface MarkdownOptions {
+	/** Preserve source list markers instead of normalizing them. */
+	preserveOrderedListMarkers?: boolean;
+	/** Preserve source backslash escapes instead of normalizing escaped punctuation. */
+	preserveBackslashEscapes?: boolean;
+}
+
 interface InlineStyleContext {
 	applyText: (text: string) => string;
 	stylePrefix: string;
@@ -81,6 +113,7 @@ export class Markdown implements Component {
 	private paddingY: number; // Top/bottom padding
 	private defaultTextStyle?: DefaultTextStyle;
 	private theme: MarkdownTheme;
+	private options: MarkdownOptions;
 	private defaultStylePrefix?: string;
 
 	// Cache for rendered output
@@ -94,12 +127,14 @@ export class Markdown implements Component {
 		paddingY: number,
 		theme: MarkdownTheme,
 		defaultTextStyle?: DefaultTextStyle,
+		options?: MarkdownOptions,
 	) {
 		this.text = text;
 		this.paddingX = paddingX;
 		this.paddingY = paddingY;
 		this.theme = theme;
 		this.defaultTextStyle = defaultTextStyle;
+		this.options = options ? { ...options } : {};
 	}
 
 	setText(text: string): void {
@@ -137,6 +172,7 @@ export class Markdown implements Component {
 
 		// Parse markdown to HTML-like tokens
 		const tokens = markdownParser.lexer(normalizedText);
+		trimPartialClosingFences(tokens);
 
 		// Convert tokens to styled terminal output
 		const renderedLines: string[] = [];
@@ -464,6 +500,10 @@ export class Markdown implements Component {
 
 		for (const token of tokens) {
 			switch (token.type) {
+				case "escape":
+					result += applyTextWithNewlines(this.options.preserveBackslashEscapes ? token.raw : token.text);
+					break;
+
 				case "text":
 					// Text tokens in list items can have nested tokens for inline formatting
 					if (token.tokens && token.tokens.length > 0) {
@@ -548,6 +588,16 @@ export class Markdown implements Component {
 		return result;
 	}
 
+	private getOrderedListMarker(item: Tokens.ListItem): string | undefined {
+		const match = /^(?: {0,3})(\d{1,9}[.)])[ \t]+/.exec(item.raw);
+		return match ? `${match[1]} ` : undefined;
+	}
+
+	private getUnorderedListMarker(item: Tokens.ListItem): string | undefined {
+		const match = /^(?: {0,3})([-+*])(?:[ \t]+|(?=\r?\n|$))/.exec(item.raw);
+		return match ? `${match[1]} ` : undefined;
+	}
+
 	/**
 	 * Render a list with proper nesting support
 	 */
@@ -559,7 +609,14 @@ export class Markdown implements Component {
 
 		for (let i = 0; i < token.items.length; i++) {
 			const item = token.items[i];
-			const bullet = token.ordered ? `${startNumber + i}. ` : "- ";
+			const isLastItem = i === token.items.length - 1;
+			const bullet = token.ordered
+				? this.options.preserveOrderedListMarkers
+					? (this.getOrderedListMarker(item) ?? `${startNumber + i}. `)
+					: `${startNumber + i}. `
+				: this.options.preserveOrderedListMarkers
+					? (this.getUnorderedListMarker(item) ?? "- ")
+					: "- ";
 			const taskMarker = item.task ? `[${item.checked ? "x" : " "}] ` : "";
 			const marker = bullet + taskMarker;
 			const firstPrefix = indent + this.theme.listBullet(marker);
@@ -586,6 +643,10 @@ export class Markdown implements Component {
 
 			if (!renderedAnyLine) {
 				lines.push(firstPrefix);
+			}
+
+			if (token.loose && !isLastItem) {
+				lines.push("");
 			}
 		}
 

@@ -1,10 +1,10 @@
 import { existsSync, mkdirSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { getModel } from "@earendil-works/pi-ai";
+import { getModel } from "@earendil-works/pi-ai/compat";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { createAgentSession } from "../src/core/sdk.js";
-import { SessionManager } from "../src/core/session-manager.js";
+import { createAgentSession } from "../src/core/sdk.ts";
+import { SessionManager } from "../src/core/session-manager.ts";
 
 describe("createAgentSession session manager defaults", () => {
 	let tempDir: string;

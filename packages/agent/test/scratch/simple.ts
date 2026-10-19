@@ -1,23 +1,26 @@
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { getModel } from "@earendil-works/pi-ai";
-import { InMemorySessionStorage } from "../../src/harness/session/storage/memory.js";
+import { createModels } from "@earendil-works/pi-ai";
+import { cloudflareAIGatewayProvider } from "@earendil-works/pi-ai/providers/cloudflare-ai-gateway";
+import { openaiProvider } from "@earendil-works/pi-ai/providers/openai";
+import { NodeExecutionEnv } from "../../src/harness/env/nodejs.ts";
+import { InMemorySessionStorage } from "../../src/harness/session/memory-storage.ts";
 import {
 	AgentHarness,
 	formatSkillsForSystemPrompt,
 	loadSourcedPromptTemplates,
 	loadSourcedSkills,
-	NodeExecutionEnv,
 	type PromptTemplate,
 	Session,
 	type Skill,
-} from "../../src/index.js";
+} from "../../src/index.ts";
 
 type Source = { type: "project" | "user" | "path"; dir: string };
 type SourcedSkill = Skill & { source: Source };
 type SourcedPromptTemplate = PromptTemplate & { source: Source };
 
 const env = new NodeExecutionEnv({ cwd: process.cwd() });
+
 const source = (type: Source["type"], dir: string) => ({ path: dir, source: { type, dir } });
 const { skills: sourcedSkills } = await loadSourcedSkills<Source, SourcedSkill>(
 	env,
@@ -34,11 +37,22 @@ const { promptTemplates: sourcedPromptTemplates } = await loadSourcedPromptTempl
 	(promptTemplate, source) => ({ ...promptTemplate, source }),
 );
 
+const models = createModels();
+models.setProvider(openaiProvider());
+models.setProvider(cloudflareAIGatewayProvider());
+const model = models.getModel("openai", "gpt-5.5");
+// const model = models.getModel("cloudflare-ai-gateway", "claude-haiku-4-5");
+if (!model) {
+	console.log("Model not found");
+	process.exit(-1);
+}
+
 const session = new Session(new InMemorySessionStorage());
 const agent = new AgentHarness({
 	env,
 	session,
-	model: getModel("openai", "gpt-5.5"),
+	models,
+	model,
 	thinkingLevel: "low",
 	systemPrompt: ({ env, resources }) =>
 		[

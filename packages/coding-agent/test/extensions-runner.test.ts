@@ -6,13 +6,18 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { AuthStorage } from "../src/core/auth-storage.js";
-import { createExtensionRuntime, discoverAndLoadExtensions } from "../src/core/extensions/loader.js";
-import { ExtensionRunner } from "../src/core/extensions/runner.js";
-import type { ExtensionActions, ExtensionContextActions, ProviderConfig } from "../src/core/extensions/types.js";
-import { KeybindingsManager, type KeyId } from "../src/core/keybindings.js";
-import { ModelRegistry } from "../src/core/model-registry.js";
-import { SessionManager } from "../src/core/session-manager.js";
+import { AuthStorage } from "../src/core/auth-storage.ts";
+import { createExtensionRuntime, discoverAndLoadExtensions, loadExtensions } from "../src/core/extensions/loader.ts";
+import { ExtensionRunner, emitProjectTrustEvent } from "../src/core/extensions/runner.ts";
+import type {
+	ExtensionActions,
+	ExtensionContextActions,
+	ExtensionUIContext,
+	ProviderConfig,
+} from "../src/core/extensions/types.ts";
+import { KeybindingsManager, type KeyId } from "../src/core/keybindings.ts";
+import { ModelRegistry } from "../src/core/model-registry.ts";
+import { SessionManager } from "../src/core/session-manager.ts";
 
 describe("ExtensionRunner", () => {
 	let tempDir: string;
@@ -36,7 +41,7 @@ describe("ExtensionRunner", () => {
 
 	const providerModelConfig: ProviderConfig = {
 		baseUrl: "https://provider.test/v1",
-		apiKey: "PROVIDER_TEST_KEY",
+		apiKey: "provider-test-key",
 		api: "openai-completions",
 		models: [
 			{
@@ -44,7 +49,21 @@ describe("ExtensionRunner", () => {
 				name: "Instant Model",
 				reasoning: false,
 				input: ["text"],
-				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+				cost: {
+					input: 1,
+					output: 2,
+					cacheRead: 0.1,
+					cacheWrite: 1.25,
+					tiers: [
+						{
+							inputTokensAbove: 272000,
+							input: 2,
+							output: 3,
+							cacheRead: 0.2,
+							cacheWrite: 2.5,
+						},
+					],
+				},
 				contextWindow: 128000,
 				maxTokens: 4096,
 			},
@@ -71,6 +90,7 @@ describe("ExtensionRunner", () => {
 	const extensionContextActions: ExtensionContextActions = {
 		getModel: () => undefined,
 		isIdle: () => true,
+		isProjectTrusted: () => true,
 		getSignal: () => undefined,
 		abort: () => {},
 		hasPendingMessages: () => false,
@@ -79,6 +99,45 @@ describe("ExtensionRunner", () => {
 		compact: () => {},
 		getSystemPrompt: () => "",
 	};
+
+	describe("project_trust", () => {
+		it("continues past undecided handlers and returns the first yes/no decision", async () => {
+			const undecidedPath = path.join(extensionsDir, "undecided.ts");
+			const decidedPath = path.join(extensionsDir, "decided.ts");
+			fs.writeFileSync(
+				undecidedPath,
+				`export default function(pi) {
+	pi.on("project_trust", () => ({ trusted: "undecided", remember: true }));
+}`,
+			);
+			fs.writeFileSync(
+				decidedPath,
+				`export default function(pi) {
+	pi.on("project_trust", () => ({ trusted: "no", remember: true }));
+}`,
+			);
+
+			const extensionsResult = await loadExtensions([undecidedPath, decidedPath], tempDir);
+			const result = await emitProjectTrustEvent(
+				extensionsResult,
+				{ type: "project_trust", cwd: tempDir },
+				{
+					cwd: tempDir,
+					mode: "tui",
+					hasUI: false,
+					ui: {
+						select: async () => undefined,
+						confirm: async () => false,
+						input: async () => undefined,
+						notify: () => {},
+					},
+				},
+			);
+
+			expect(result.result).toEqual({ trusted: "no", remember: true });
+			expect(result.errors).toEqual([]);
+		});
+	});
 
 	describe("shortcut conflicts", () => {
 		it("warns when extension shortcut conflicts with built-in", async () => {
@@ -441,6 +500,50 @@ describe("ExtensionRunner", () => {
 			controller.abort();
 			expect(ctx.signal?.aborted).toBe(true);
 		});
+
+		it("exposes print mode and hasUI false by default", async () => {
+			const result = await discoverAndLoadExtensions([], tempDir, tempDir);
+			const runner = new ExtensionRunner(result.extensions, result.runtime, tempDir, sessionManager, modelRegistry);
+			runner.bindCore(extensionActions, extensionContextActions);
+
+			const ctx = runner.createContext();
+			expect(ctx.mode).toBe("print");
+			expect(ctx.hasUI).toBe(false);
+		});
+
+		it("exposes project trust state on ExtensionContext", async () => {
+			const result = await discoverAndLoadExtensions([], tempDir, tempDir);
+			const runner = new ExtensionRunner(result.extensions, result.runtime, tempDir, sessionManager, modelRegistry);
+			runner.bindCore(extensionActions, {
+				...extensionContextActions,
+				isProjectTrusted: () => false,
+			});
+
+			const ctx = runner.createContext();
+			expect(ctx.isProjectTrusted()).toBe(false);
+		});
+
+		it("exposes rpc mode with hasUI true when an RPC UI context is provided", async () => {
+			const result = await discoverAndLoadExtensions([], tempDir, tempDir);
+			const runner = new ExtensionRunner(result.extensions, result.runtime, tempDir, sessionManager, modelRegistry);
+			runner.bindCore(extensionActions, extensionContextActions);
+			runner.setUIContext({} as ExtensionUIContext, "rpc");
+
+			const ctx = runner.createContext();
+			expect(ctx.mode).toBe("rpc");
+			expect(ctx.hasUI).toBe(true);
+		});
+
+		it("exposes tui mode with hasUI true when a TUI UI context is provided", async () => {
+			const result = await discoverAndLoadExtensions([], tempDir, tempDir);
+			const runner = new ExtensionRunner(result.extensions, result.runtime, tempDir, sessionManager, modelRegistry);
+			runner.bindCore(extensionActions, extensionContextActions);
+			runner.setUIContext({} as ExtensionUIContext, "tui");
+
+			const ctx = runner.createContext();
+			expect(ctx.mode).toBe("tui");
+			expect(ctx.hasUI).toBe(true);
+		});
 	});
 
 	describe("error handling", () => {
@@ -471,7 +574,7 @@ describe("ExtensionRunner", () => {
 		});
 	});
 
-	describe("message renderers", () => {
+	describe("message and entry renderers", () => {
 		it("gets message renderer by type", async () => {
 			const extCode = `
 				export default function(pi) {
@@ -488,6 +591,21 @@ describe("ExtensionRunner", () => {
 
 			const missing = runner.getMessageRenderer("not-exists");
 			expect(missing).toBeUndefined();
+		});
+
+		it("gets entry renderer by type", async () => {
+			const extCode = `
+				export default function(pi) {
+					pi.registerEntryRenderer("my-entry", (entry, options, theme) => null);
+				}
+			`;
+			fs.writeFileSync(path.join(extensionsDir, "entry-renderer.ts"), extCode);
+
+			const result = await discoverAndLoadExtensions([], tempDir, tempDir);
+			const runner = new ExtensionRunner(result.extensions, result.runtime, tempDir, sessionManager, modelRegistry);
+
+			expect(runner.getEntryRenderer("my-entry")).toBeDefined();
+			expect(runner.getEntryRenderer("not-exists")).toBeUndefined();
 		});
 	});
 
@@ -755,7 +873,15 @@ describe("ExtensionRunner", () => {
 
 			runtime.registerProvider("instant-provider", providerModelConfig);
 			expect(runtime.pendingProviderRegistrations).toHaveLength(0);
-			expect(modelRegistry.find("instant-provider", "instant-model")).toBeDefined();
+			expect(modelRegistry.find("instant-provider", "instant-model")?.cost.tiers).toEqual([
+				{
+					inputTokensAbove: 272000,
+					input: 2,
+					output: 3,
+					cacheRead: 0.2,
+					cacheWrite: 2.5,
+				},
+			]);
 
 			runtime.unregisterProvider("instant-provider");
 			expect(modelRegistry.find("instant-provider", "instant-model")).toBeUndefined();
@@ -800,6 +926,60 @@ describe("ExtensionRunner", () => {
 
 			expect(runner.hasHandlers("tool_call")).toBe(true);
 			expect(runner.hasHandlers("agent_end")).toBe(false);
+		});
+	});
+
+	describe("before_provider_headers", () => {
+		it("lets a handler mutate headers in place and preserves existing headers", async () => {
+			const extCode = `
+				export default function(pi) {
+					pi.on("before_provider_headers", (event) => {
+						event.headers["X-Turn-Index"] = "3";
+					});
+				}
+			`;
+			fs.writeFileSync(path.join(extensionsDir, "headers.ts"), extCode);
+
+			const result = await discoverAndLoadExtensions([], tempDir, tempDir);
+			const runner = new ExtensionRunner(result.extensions, result.runtime, tempDir, sessionManager, modelRegistry);
+
+			expect(runner.hasHandlers("before_provider_headers")).toBe(true);
+
+			const headers = await runner.emitBeforeProviderHeaders({ "User-Agent": "kimchi/1.0" });
+			expect(headers["X-Turn-Index"]).toBe("3");
+			expect(headers["User-Agent"]).toBe("kimchi/1.0");
+		});
+
+		it("isolates a throwing handler and still applies the others", async () => {
+			const throwing = `
+				export default function(pi) {
+					pi.on("before_provider_headers", () => {
+						throw new Error("header handler boom");
+					});
+				}
+			`;
+			const good = `
+				export default function(pi) {
+					pi.on("before_provider_headers", (event) => {
+						event.headers["X-Good"] = "yes";
+					});
+				}
+			`;
+			fs.writeFileSync(path.join(extensionsDir, "a-throwing.ts"), throwing);
+			fs.writeFileSync(path.join(extensionsDir, "b-good.ts"), good);
+
+			const result = await discoverAndLoadExtensions([], tempDir, tempDir);
+			const runner = new ExtensionRunner(result.extensions, result.runtime, tempDir, sessionManager, modelRegistry);
+			const errors: Array<{ event: string; error: string }> = [];
+			runner.onError((err) => errors.push(err));
+
+			const headers = await runner.emitBeforeProviderHeaders({ "User-Agent": "x" });
+
+			expect(headers["X-Good"]).toBe("yes");
+			expect(headers["User-Agent"]).toBe("x");
+			expect(errors).toHaveLength(1);
+			expect(errors[0].event).toBe("before_provider_headers");
+			expect(errors[0].error).toContain("header handler boom");
 		});
 	});
 });

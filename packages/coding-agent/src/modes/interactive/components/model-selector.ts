@@ -9,11 +9,12 @@ import {
 	Text,
 	type TUI,
 } from "@earendil-works/pi-tui";
-import type { ModelRegistry } from "../../../core/model-registry.js";
-import type { SettingsManager } from "../../../core/settings-manager.js";
-import { theme } from "../theme/theme.js";
-import { DynamicBorder } from "./dynamic-border.js";
-import { keyHint } from "./keybinding-hints.js";
+import type { ModelRegistry } from "../../../core/model-registry.ts";
+import type { SettingsManager } from "../../../core/settings-manager.ts";
+import { getModelSelectorSearchText } from "../model-search.ts";
+import { theme } from "../theme/theme.ts";
+import { DynamicBorder } from "./dynamic-border.ts";
+import { keyHint } from "./keybinding-hints.ts";
 
 interface ModelItem {
 	provider: string;
@@ -217,10 +218,8 @@ export class ModelSelectorComponent extends Container implements Focusable {
 
 	private filterModels(query: string): void {
 		this.filteredModels = query
-			? fuzzyFilter(
-					this.activeModels,
-					query,
-					({ id, provider }) => `${id} ${provider} ${provider}/${id} ${provider} ${id}`,
+			? fuzzyFilter(this.activeModels, query, ({ id, provider, model }) =>
+					getModelSelectorSearchText({ id, provider, name: model.name }),
 				)
 			: this.activeModels;
 		this.selectedIndex = Math.min(this.selectedIndex, Math.max(0, this.filteredModels.length - 1));

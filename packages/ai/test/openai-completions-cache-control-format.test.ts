@@ -1,8 +1,8 @@
 import { Type } from "typebox";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { getModel } from "../src/models.js";
-import { streamOpenAICompletions } from "../src/providers/openai-completions.js";
-import type { Model } from "../src/types.js";
+import { stream as streamOpenAICompletions } from "../src/api/openai-completions.ts";
+import { getModel } from "../src/compat.ts";
+import type { Model } from "../src/types.ts";
 
 interface CacheControl {
 	type: "ephemeral";

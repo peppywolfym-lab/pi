@@ -1,23 +1,23 @@
 import { existsSync, mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fauxAssistantMessage, registerFauxProvider } from "@earendil-works/pi-ai";
+import { fauxAssistantMessage, registerFauxProvider } from "@earendil-works/pi-ai/compat";
 import { afterEach, describe, expect, it } from "vitest";
 import {
 	type CreateAgentSessionRuntimeFactory,
 	createAgentSessionFromServices,
 	createAgentSessionRuntime,
 	createAgentSessionServices,
-} from "../src/core/agent-session-runtime.js";
-import { AuthStorage } from "../src/core/auth-storage.js";
-import { SessionManager } from "../src/core/session-manager.js";
+} from "../src/core/agent-session-runtime.ts";
+import { AuthStorage } from "../src/core/auth-storage.ts";
+import { SessionManager } from "../src/core/session-manager.ts";
 import type {
 	ExtensionFactory,
 	SessionBeforeForkEvent,
 	SessionBeforeSwitchEvent,
 	SessionShutdownEvent,
 	SessionStartEvent,
-} from "../src/index.js";
+} from "../src/index.ts";
 
 type RecordedSessionEvent =
 	| SessionBeforeSwitchEvent

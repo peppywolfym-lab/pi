@@ -7,8 +7,8 @@ import {
 	type TextContent,
 	type ThinkingBudgets,
 	type Transport,
-} from "@earendil-works/pi-ai";
-import { runAgentLoop, runAgentLoopContinue } from "./agent-loop.js";
+} from "@earendil-works/pi-ai/compat";
+import { runAgentLoop, runAgentLoopContinue } from "./agent-loop.ts";
 import type {
 	AfterToolCallContext,
 	AfterToolCallResult,
@@ -21,9 +21,13 @@ import type {
 	AgentTool,
 	BeforeToolCallContext,
 	BeforeToolCallResult,
+	PrepareNextTurnContext,
+	QueueMode,
 	StreamFn,
 	ToolExecutionMode,
-} from "./types.js";
+} from "./types.ts";
+
+export type { QueueMode } from "./types.ts";
 
 function defaultConvertToLlm(messages: AgentMessage[]): Message[] {
 	return messages.filter(
@@ -52,8 +56,6 @@ const DEFAULT_MODEL = {
 	contextWindow: 0,
 	maxTokens: 0,
 } satisfies Model<any>;
-
-export type QueueMode = "all" | "one-at-a-time";
 
 type MutableAgentState = Omit<AgentState, "isStreaming" | "streamingMessage" | "pendingToolCalls" | "errorMessage"> & {
 	isStreaming: boolean;
@@ -105,6 +107,10 @@ export interface AgentOptions {
 	prepareNextTurn?: (
 		signal?: AbortSignal,
 	) => Promise<AgentLoopTurnUpdate | undefined> | AgentLoopTurnUpdate | undefined;
+	prepareNextTurnWithContext?: (
+		context: PrepareNextTurnContext,
+		signal?: AbortSignal,
+	) => Promise<AgentLoopTurnUpdate | undefined> | AgentLoopTurnUpdate | undefined;
 	steeringMode?: QueueMode;
 	followUpMode?: QueueMode;
 	sessionId?: string;
@@ -116,8 +122,11 @@ export interface AgentOptions {
 
 class PendingMessageQueue {
 	private messages: AgentMessage[] = [];
+	public mode: QueueMode;
 
-	constructor(public mode: QueueMode) {}
+	constructor(mode: QueueMode) {
+		this.mode = mode;
+	}
 
 	enqueue(message: AgentMessage): void {
 		this.messages.push(message);
@@ -182,6 +191,10 @@ export class Agent {
 	public prepareNextTurn?: (
 		signal?: AbortSignal,
 	) => Promise<AgentLoopTurnUpdate | undefined> | AgentLoopTurnUpdate | undefined;
+	public prepareNextTurnWithContext?: (
+		context: PrepareNextTurnContext,
+		signal?: AbortSignal,
+	) => Promise<AgentLoopTurnUpdate | undefined> | AgentLoopTurnUpdate | undefined;
 	private activeRun?: ActiveRun;
 	/** Session identifier forwarded to providers for cache-aware backends. */
 	public sessionId?: string;
@@ -205,6 +218,7 @@ export class Agent {
 		this.beforeToolCall = options.beforeToolCall;
 		this.afterToolCall = options.afterToolCall;
 		this.prepareNextTurn = options.prepareNextTurn;
+		this.prepareNextTurnWithContext = options.prepareNextTurnWithContext;
 		this.steeringQueue = new PendingMessageQueue(options.steeringMode ?? "one-at-a-time");
 		this.followUpQueue = new PendingMessageQueue(options.followUpMode ?? "one-at-a-time");
 		this.sessionId = options.sessionId;
@@ -429,7 +443,15 @@ export class Agent {
 			toolExecution: this.toolExecution,
 			beforeToolCall: this.beforeToolCall,
 			afterToolCall: this.afterToolCall,
-			prepareNextTurn: this.prepareNextTurn ? async () => await this.prepareNextTurn?.(this.signal) : undefined,
+			prepareNextTurn:
+				this.prepareNextTurnWithContext || this.prepareNextTurn
+					? async (context) => {
+							if (this.prepareNextTurnWithContext) {
+								return await this.prepareNextTurnWithContext(context, this.signal);
+							}
+							return await this.prepareNextTurn?.(this.signal);
+						}
+					: undefined,
 			convertToLlm: this.convertToLlm,
 			transformContext: this.transformContext,
 			getApiKey: this.getApiKey,

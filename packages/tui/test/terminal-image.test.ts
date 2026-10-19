@@ -4,7 +4,7 @@
 
 import assert from "node:assert";
 import { describe, it } from "node:test";
-import { Image } from "../src/components/image.js";
+import { Image } from "../src/components/image.ts";
 import {
 	deleteAllKittyImages,
 	deleteKittyImage,
@@ -16,18 +16,22 @@ import {
 	resetCapabilitiesCache,
 	setCapabilities,
 	setCellDimensions,
-} from "../src/terminal-image.js";
+} from "../src/terminal-image.ts";
 
 const ENV_KEYS = [
 	"TERM",
 	"TERM_PROGRAM",
+	"TERMINAL_EMULATOR",
 	"COLORTERM",
 	"TMUX",
 	"KITTY_WINDOW_ID",
 	"GHOSTTY_RESOURCES_DIR",
 	"WEZTERM_PANE",
 	"ITERM_SESSION_ID",
+	"WT_SESSION",
 	"CMUX_WORKSPACE_ID",
+	"WARP_SESSION_ID",
+	"WARP_TERMINAL_SESSION_UUID",
 ] as const;
 
 function withEnv(overrides: Record<string, string | undefined>, fn: () => void): void {
@@ -205,19 +209,30 @@ describe("detectCapabilities", () => {
 		});
 	});
 
-	it("forces hyperlinks: false under tmux even if outer terminal supports OSC 8", () => {
+	it("enables hyperlinks under tmux when the client forwards them", () => {
 		withEnv({ TMUX: "/tmp/tmux-1000/default,1234,0", TERM_PROGRAM: "ghostty" }, () => {
-			const caps = detectCapabilities();
+			const caps = detectCapabilities(() => true);
+			assert.strictEqual(caps.hyperlinks, true);
+			assert.strictEqual(caps.images, null);
+		});
+	});
+
+	it("disables hyperlinks under tmux when the client does not forward them", () => {
+		withEnv({ TMUX: "/tmp/tmux-1000/default,1234,0", TERM_PROGRAM: "ghostty" }, () => {
+			const caps = detectCapabilities(() => false);
 			assert.strictEqual(caps.hyperlinks, false);
 			assert.strictEqual(caps.images, null);
 		});
 	});
 
-	it("forces hyperlinks: false when TERM starts with 'tmux'", () => {
+	it("checks tmux capability when TERM starts with 'tmux'", () => {
 		withEnv({ TERM: "tmux-256color", TERM_PROGRAM: "iterm.app" }, () => {
-			const caps = detectCapabilities();
-			assert.strictEqual(caps.hyperlinks, false);
+			const caps = detectCapabilities(() => true);
+			assert.strictEqual(caps.hyperlinks, true);
 			assert.strictEqual(caps.images, null);
+
+			const caps2 = detectCapabilities(() => false);
+			assert.strictEqual(caps2.hyperlinks, false);
 		});
 	});
 
@@ -258,6 +273,48 @@ describe("detectCapabilities", () => {
 		});
 	});
 
+	it("enables images and hyperlinks for Warp via TERM_PROGRAM", () => {
+		withEnv({ TERM_PROGRAM: "WarpTerminal" }, () => {
+			const caps = detectCapabilities();
+			assert.strictEqual(caps.images, "kitty");
+			assert.strictEqual(caps.trueColor, true);
+			assert.strictEqual(caps.hyperlinks, true);
+		});
+	});
+
+	it("enables images and hyperlinks for Warp via WARP_SESSION_ID", () => {
+		withEnv({ WARP_SESSION_ID: "some-session-id" }, () => {
+			const caps = detectCapabilities();
+			assert.strictEqual(caps.images, "kitty");
+			assert.strictEqual(caps.trueColor, true);
+			assert.strictEqual(caps.hyperlinks, true);
+		});
+	});
+
+	it("enables images and hyperlinks for Warp via WARP_TERMINAL_SESSION_UUID", () => {
+		withEnv({ WARP_TERMINAL_SESSION_UUID: "d0e1a2e5-7ca7-44cd-9037-ac7222011161" }, () => {
+			const caps = detectCapabilities();
+			assert.strictEqual(caps.images, "kitty");
+			assert.strictEqual(caps.trueColor, true);
+			assert.strictEqual(caps.hyperlinks, true);
+		});
+	});
+
+	it("disables images for Warp inside tmux", () => {
+		withEnv(
+			{
+				TERM_PROGRAM: "WarpTerminal",
+				TMUX: "/tmp/tmux-1000/default,1234,0",
+				TERM: "tmux-256color",
+			},
+			() => {
+				const caps = detectCapabilities(() => true);
+				assert.strictEqual(caps.images, null);
+				assert.strictEqual(caps.hyperlinks, true);
+			},
+		);
+	});
+
 	it("enables hyperlinks for iTerm2", () => {
 		withEnv({ TERM_PROGRAM: "iterm.app" }, () => {
 			const caps = detectCapabilities();
@@ -269,6 +326,42 @@ describe("detectCapabilities", () => {
 		withEnv({ TERM_PROGRAM: "vscode" }, () => {
 			const caps = detectCapabilities();
 			assert.strictEqual(caps.hyperlinks, true);
+		});
+	});
+
+	it("enables truecolor and hyperlinks for Windows Terminal outside multiplexers", () => {
+		withEnv({ WT_SESSION: "session", TERM: "xterm-256color" }, () => {
+			const caps = detectCapabilities();
+			assert.strictEqual(caps.trueColor, true);
+			assert.strictEqual(caps.hyperlinks, true);
+			assert.strictEqual(caps.images, null);
+		});
+	});
+
+	it("enables truecolor without hyperlinks for JetBrains terminal", () => {
+		withEnv({ TERMINAL_EMULATOR: "JetBrains-JediTerm", TERM: "xterm-256color" }, () => {
+			const caps = detectCapabilities();
+			assert.strictEqual(caps.trueColor, true);
+			assert.strictEqual(caps.hyperlinks, false);
+			assert.strictEqual(caps.images, null);
+		});
+	});
+
+	it("does not inherit Windows Terminal truecolor through tmux", () => {
+		withEnv({ WT_SESSION: "session", TMUX: "/tmp/tmux-1000/default,1234,0", TERM: "tmux-256color" }, () => {
+			const caps = detectCapabilities(() => false);
+			assert.strictEqual(caps.trueColor, false);
+			assert.strictEqual(caps.hyperlinks, false);
+			assert.strictEqual(caps.images, null);
+		});
+	});
+
+	it("trusts explicit truecolor hints through tmux", () => {
+		withEnv({ COLORTERM: "truecolor", TMUX: "/tmp/tmux-1000/default,1234,0", TERM: "tmux-256color" }, () => {
+			const caps = detectCapabilities(() => false);
+			assert.strictEqual(caps.trueColor, true);
+			assert.strictEqual(caps.hyperlinks, false);
+			assert.strictEqual(caps.images, null);
 		});
 	});
 });

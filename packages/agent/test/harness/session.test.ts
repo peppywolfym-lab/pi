@@ -1,11 +1,20 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { Session } from "../../src/harness/session/session.js";
-import { JsonlSessionStorage } from "../../src/harness/session/storage/jsonl.js";
-import { InMemorySessionStorage } from "../../src/harness/session/storage/memory.js";
-import type { SessionStorage } from "../../src/harness/types.js";
-import { createAssistantMessage, createTempDir, createUserMessage, getLatestTempDir } from "./session-test-utils.js";
+import { NodeExecutionEnv } from "../../src/harness/env/nodejs.ts";
+import { JsonlSessionStorage } from "../../src/harness/session/jsonl-storage.ts";
+import { InMemorySessionStorage } from "../../src/harness/session/memory-storage.ts";
+import { type ContextEntryTransform, Session } from "../../src/harness/session/session.ts";
+import type { SessionStorage } from "../../src/harness/types.ts";
+import { createAssistantMessage, createTempDir, createUserMessage, getLatestTempDir } from "./session-test-utils.ts";
+
+function getTextData(data: unknown): string {
+	if (typeof data !== "object" || data === null || !("text" in data)) {
+		return "";
+	}
+	const value = (data as { text?: unknown }).text;
+	return typeof value === "string" ? value : "";
+}
 
 async function runSessionSuite(
 	name: string,
@@ -85,6 +94,51 @@ async function runSessionSuite(
 			expect(context.messages[1]?.role).toBe("custom");
 		});
 
+		it("keeps custom entries in context entries but omits them from messages by default", async () => {
+			const session = new Session(await createStorage());
+			await session.appendMessage(createUserMessage("one"));
+			await session.appendCustomEntry("chat_message", { text: "hello" });
+			const contextEntries = await session.buildContextEntries();
+			const context = await session.buildContext();
+			expect(contextEntries.map((entry) => entry.type)).toEqual(["message", "custom"]);
+			expect(context.messages).toHaveLength(1);
+		});
+
+		it("projects custom entries with configured custom-entry projectors", async () => {
+			const session = new Session(await createStorage(), {
+				entryProjectors: {
+					chat_message: (entry) => [createUserMessage(`chat: ${getTextData(entry.data)}`)],
+				},
+			});
+			await session.appendMessage(createUserMessage("one"));
+			await session.appendCustomEntry("chat_message", { text: "hello" });
+			const context = await session.buildContext();
+			expect(context.messages.map((message) => message.role)).toEqual(["user", "user"]);
+			expect(context.messages[1]).toMatchObject({ content: [{ type: "text", text: "chat: hello" }] });
+		});
+
+		it("applies context entry transforms after default compaction selection", async () => {
+			let observedFirstEntryType: string | undefined;
+			const dropCompaction: ContextEntryTransform = (entries) => {
+				observedFirstEntryType = entries[0]?.type;
+				return entries.filter((entry) => entry.type !== "compaction");
+			};
+			const session = new Session(await createStorage(), { entryTransforms: [dropCompaction] });
+			await session.appendMessage(createUserMessage("one"));
+			const kept = await session.appendMessage(createUserMessage("two"));
+			await session.appendCompaction("summary", kept, 1234);
+			await session.appendMessage(createUserMessage("three"));
+			const context = await session.buildContext();
+			expect(observedFirstEntryType).toBe("compaction");
+			expect(context.messages.map((message) => message.role)).toEqual(["user", "user"]);
+		});
+
+		it("normalizes session names", async () => {
+			const session = new Session(await createStorage());
+			await session.appendSessionName(" hello\nworld\r\nagain ");
+			expect(await session.getSessionName()).toBe("hello world again");
+		});
+
 		it("supports labels and session info entries without affecting context", async () => {
 			const session = new Session(await createStorage());
 			const user1 = await session.appendMessage(createUserMessage("one"));
@@ -128,7 +182,8 @@ runSessionSuite(
 	"Session with JSONL storage",
 	async () => {
 		const dir = createTempDir();
-		return await JsonlSessionStorage.create(join(dir, "session.jsonl"), { cwd: dir, sessionId: "session-1" });
+		const env = new NodeExecutionEnv({ cwd: dir });
+		return await JsonlSessionStorage.create(env, join(dir, "session.jsonl"), { cwd: dir, sessionId: "session-1" });
 	},
 	() => {
 		const dir = getLatestTempDir();
@@ -138,10 +193,10 @@ runSessionSuite(
 		const header = JSON.parse(lines[0]!);
 		expect(header.type).toBe("session");
 		expect(header.version).toBe(3);
-		for (const line of lines.slice(1)) {
-			const entry = JSON.parse(line);
+		const entries = lines.slice(1).map((line) => JSON.parse(line));
+		expect(entries.some((entry) => entry.type === "leaf")).toBe(true);
+		for (const entry of entries) {
 			expect(entry.type).not.toBe("entry");
-			expect(entry.type).not.toBe("leaf");
 			expect(typeof entry.id).toBe("string");
 		}
 	},

@@ -2,8 +2,8 @@ import type { AgentTool, ThinkingLevel } from "@earendil-works/pi-agent-core";
 import { fauxAssistantMessage, fauxToolCall, type Model } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
 import { afterEach, describe, expect, it } from "vitest";
-import type { ExtensionAPI } from "../../src/index.js";
-import { createHarness, getAssistantTexts, type Harness } from "./harness.js";
+import type { BuildSystemPromptOptions, ExtensionAPI } from "../../src/index.ts";
+import { createHarness, getAssistantTexts, type Harness } from "./harness.ts";
 
 describe("AgentSession model and extension characterization", () => {
 	const harnesses: Harness[] = [];
@@ -76,6 +76,26 @@ describe("AgentSession model and extension characterization", () => {
 		harness.session.setThinkingLevel("high");
 		expect(harness.session.thinkingLevel).toBe("off");
 		expect(harness.session.cycleThinkingLevel()).toBeUndefined();
+	});
+
+	it("cycles xhigh before max when both are supported", async () => {
+		const harness = await createHarness({ models: [{ id: "faux-1", reasoning: true }] });
+		harnesses.push(harness);
+		harness.getModel().thinkingLevelMap = { xhigh: "xhigh", max: "max" };
+
+		expect(harness.session.getAvailableThinkingLevels()).toEqual([
+			"off",
+			"minimal",
+			"low",
+			"medium",
+			"high",
+			"xhigh",
+			"max",
+		]);
+		harness.session.setThinkingLevel("high");
+		expect(harness.session.cycleThinkingLevel()).toBe("xhigh");
+		expect(harness.session.cycleThinkingLevel()).toBe("max");
+		expect(harness.session.cycleThinkingLevel()).toBe("off");
 	});
 
 	it("throws when setModel is called without configured auth", async () => {
@@ -258,6 +278,34 @@ describe("AgentSession model and extension characterization", () => {
 		expect(providerUserText).toBe("transformed:hello");
 		expect(transformedHarness.session.messages.filter((message) => message.role === "user")).toHaveLength(1);
 		expect(extensionApi).toBeDefined();
+	});
+
+	it("allows extension commands to inspect live system prompt options", async () => {
+		const seenOptions: BuildSystemPromptOptions[] = [];
+		const harness = await createHarness({
+			extensionFactories: [
+				(pi) => {
+					pi.registerCommand("inspect-options", {
+						description: "Inspect system prompt options",
+						handler: async (_args, ctx) => {
+							const options = ctx.getSystemPromptOptions();
+							seenOptions.push(options);
+							options.selectedTools?.push("mutated_tool");
+						},
+					});
+				},
+			],
+		});
+		harnesses.push(harness);
+
+		await harness.session.prompt("/inspect-options");
+		await harness.session.prompt("/inspect-options");
+
+		expect(seenOptions).toHaveLength(2);
+		expect(seenOptions[0]).toBe(seenOptions[1]);
+		expect(seenOptions[0]?.cwd).toBe(harness.tempDir);
+		expect(seenOptions[0]?.selectedTools).toContain("read");
+		expect(seenOptions[1]?.selectedTools).toContain("mutated_tool");
 	});
 
 	it("allows before_agent_start handlers to inject custom messages and modify the system prompt", async () => {

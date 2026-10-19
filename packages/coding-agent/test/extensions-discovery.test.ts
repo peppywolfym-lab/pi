@@ -3,7 +3,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { discoverAndLoadExtensions } from "../src/core/extensions/loader.js";
+import { discoverAndLoadExtensions } from "../src/core/extensions/loader.ts";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -121,6 +121,31 @@ describe("extensions discovery", () => {
 		expect(result.extensions).toHaveLength(1);
 		expect(result.extensions[0].path).toContain("src");
 		expect(result.extensions[0].path).toContain("main.ts");
+	});
+
+	it("keeps package.json pi extension entries with leading tilde package-relative", async () => {
+		const subdir = path.join(extensionsDir, "tilde-package");
+		const directExtensionPath = path.join(subdir, "~entry.ts");
+		const slashExtensionPath = path.join(subdir, "~", "entry.ts");
+		fs.mkdirSync(path.join(subdir, "~"), { recursive: true });
+		fs.writeFileSync(directExtensionPath, extensionCode);
+		fs.writeFileSync(slashExtensionPath, extensionCode);
+		fs.writeFileSync(
+			path.join(subdir, "package.json"),
+			JSON.stringify({
+				name: "tilde-package",
+				pi: {
+					extensions: ["~entry.ts", "~/entry.ts"],
+				},
+			}),
+		);
+
+		const result = await discoverAndLoadExtensions([], tempDir, tempDir);
+
+		expect(result.errors).toHaveLength(0);
+		expect(result.extensions.map((extension) => extension.path).sort()).toEqual(
+			[directExtensionPath, slashExtensionPath].sort(),
+		);
 	});
 
 	it("package.json can declare multiple extensions", async () => {
@@ -310,11 +335,14 @@ describe("extensions discovery", () => {
 		expect(result.extensions[0].tools.has("parse_duration")).toBe(true);
 	});
 
-	it("registers message renderers", async () => {
+	it("registers message and entry renderers", async () => {
 		const extCode = `
 			export default function(pi) {
 				pi.registerMessageRenderer("my-custom-type", (message, options, theme) => {
 					return null; // Use default rendering
+				});
+				pi.registerEntryRenderer("my-entry-type", (entry, options, theme) => {
+					return null;
 				});
 			}
 		`;
@@ -325,6 +353,7 @@ describe("extensions discovery", () => {
 		expect(result.errors).toHaveLength(0);
 		expect(result.extensions).toHaveLength(1);
 		expect(result.extensions[0].messageRenderers.has("my-custom-type")).toBe(true);
+		expect(result.extensions[0].entryRenderers?.has("my-entry-type")).toBe(true);
 	});
 
 	it("reports error when extension throws during initialization", async () => {
@@ -440,7 +469,7 @@ describe("extensions discovery", () => {
 		fs.writeFileSync(explicitPath, extensionCodeWithTool("explicit"));
 
 		// Use loadExtensions directly to skip discovery
-		const { loadExtensions } = await import("../src/core/extensions/loader.js");
+		const { loadExtensions } = await import("../src/core/extensions/loader.ts");
 		const result = await loadExtensions([explicitPath], tempDir);
 
 		expect(result.errors).toHaveLength(0);
@@ -454,7 +483,7 @@ describe("extensions discovery", () => {
 		fs.writeFileSync(path.join(extensionsDir, "discovered.ts"), extensionCode);
 
 		// Use loadExtensions directly with empty paths
-		const { loadExtensions } = await import("../src/core/extensions/loader.js");
+		const { loadExtensions } = await import("../src/core/extensions/loader.ts");
 		const result = await loadExtensions([], tempDir);
 
 		expect(result.errors).toHaveLength(0);

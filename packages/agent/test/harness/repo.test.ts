@@ -1,8 +1,9 @@
 import { existsSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { JsonlSessionRepo } from "../../src/harness/session/repo/jsonl.js";
-import { InMemorySessionRepo } from "../../src/harness/session/repo/memory.js";
-import { createAssistantMessage, createTempDir, createUserMessage } from "./session-test-utils.js";
+import { NodeExecutionEnv } from "../../src/harness/env/nodejs.ts";
+import { JsonlSessionRepo } from "../../src/harness/session/jsonl-repo.ts";
+import { InMemorySessionRepo } from "../../src/harness/session/memory-repo.ts";
+import { createAssistantMessage, createTempDir, createUserMessage } from "./session-test-utils.ts";
 
 describe("InMemorySessionRepo", () => {
 	it("opens, deletes, and forks by metadata", async () => {
@@ -26,9 +27,10 @@ describe("InMemorySessionRepo", () => {
 describe("JsonlSessionRepo", () => {
 	it("stores sessions below encoded cwd directories and lists by cwd", async () => {
 		const root = createTempDir();
+		const env = new NodeExecutionEnv({ cwd: root });
 		const cwd = "/tmp/my-project";
 		const otherCwd = "/tmp/other-project";
-		const repo = new JsonlSessionRepo({ sessionsRoot: root });
+		const repo = new JsonlSessionRepo({ fs: env, sessionsRoot: root });
 		const session = await repo.create({ cwd, id: "019de8c2-de29-73e9-ae0c-e134db34c447" });
 		const otherSession = await repo.create({ cwd: otherCwd, id: "other-session" });
 		const metadata = await session.getMetadata();
@@ -44,7 +46,8 @@ describe("JsonlSessionRepo", () => {
 
 	it("opens, deletes, and forks by metadata", async () => {
 		const root = createTempDir();
-		const repo = new JsonlSessionRepo({ sessionsRoot: root });
+		const env = new NodeExecutionEnv({ cwd: root });
+		const repo = new JsonlSessionRepo({ fs: env, sessionsRoot: root });
 		const source = await repo.create({ cwd: "/tmp/source", id: "source-session" });
 		const sourceMetadata = await source.getMetadata();
 		const user1 = await source.appendMessage(createUserMessage("one"));
@@ -61,5 +64,29 @@ describe("JsonlSessionRepo", () => {
 		await repo.delete(sourceMetadata);
 		expect(existsSync(sourceMetadata.path)).toBe(false);
 		await expect(repo.open(sourceMetadata)).rejects.toThrow("Session not found");
+	});
+
+	it("persists header metadata through create, list, and fork", async () => {
+		const root = createTempDir();
+		const env = new NodeExecutionEnv({ cwd: root });
+		const repo = new JsonlSessionRepo({ fs: env, sessionsRoot: root });
+		const source = await repo.create({
+			cwd: "/tmp/source",
+			id: "source-session",
+			metadata: { profile: "reviewer" },
+		});
+		const sourceMetadata = await source.getMetadata();
+		expect(sourceMetadata.metadata).toEqual({ profile: "reviewer" });
+		expect((await repo.list({ cwd: "/tmp/source" })).map((listed) => listed.metadata)).toEqual([
+			{ profile: "reviewer" },
+		]);
+		const fork = await repo.fork(sourceMetadata, { cwd: "/tmp/target", id: "fork-session" });
+		expect((await fork.getMetadata()).metadata).toEqual({ profile: "reviewer" });
+		const overridden = await repo.fork(sourceMetadata, {
+			cwd: "/tmp/target",
+			id: "overridden-session",
+			metadata: { profile: "writer" },
+		});
+		expect((await overridden.getMetadata()).metadata).toEqual({ profile: "writer" });
 	});
 });

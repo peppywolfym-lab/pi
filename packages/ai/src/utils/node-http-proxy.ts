@@ -1,22 +1,96 @@
-import type { Agent as HttpAgent } from "node:http";
-import type { Agent as HttpsAgent } from "node:https";
-import { createRequire } from "node:module";
-import { HttpProxyAgent } from "http-proxy-agent";
-import { HttpsProxyAgent } from "https-proxy-agent";
+import type { ProviderEnv } from "../types.ts";
+import { getProviderEnvValue } from "./provider-env.ts";
 
-const require = createRequire(import.meta.url);
-const { getProxyForUrl } = require("proxy-from-env") as { getProxyForUrl: (url: string) => string };
+const DEFAULT_PROXY_PORTS: Record<string, number> = {
+	ftp: 21,
+	gopher: 70,
+	http: 80,
+	https: 443,
+	ws: 80,
+	wss: 443,
+};
 
-export interface NodeHttpProxyAgents {
-	httpAgent: HttpAgent;
-	httpsAgent: HttpsAgent;
+function getProxyEnv(key: string, env?: ProviderEnv): string {
+	const lowercaseKey = key.toLowerCase();
+	const uppercaseKey = key.toUpperCase();
+	return (
+		env?.[lowercaseKey] ||
+		env?.[uppercaseKey] ||
+		getProviderEnvValue(lowercaseKey) ||
+		getProviderEnvValue(uppercaseKey) ||
+		""
+	);
+}
+
+function parseProxyTargetUrl(targetUrl: string | URL): URL | undefined {
+	if (targetUrl instanceof URL) {
+		return targetUrl;
+	}
+
+	try {
+		return new URL(targetUrl);
+	} catch {
+		return undefined;
+	}
+}
+
+function shouldProxyHostname(hostname: string, port: number, env?: ProviderEnv): boolean {
+	const noProxy = getProxyEnv("no_proxy", env).toLowerCase();
+	if (!noProxy) {
+		return true;
+	}
+	if (noProxy === "*") {
+		return false;
+	}
+
+	return noProxy.split(/[,\s]/).every((proxy) => {
+		if (!proxy) {
+			return true;
+		}
+
+		const parsedProxy = proxy.match(/^(.+):(\d+)$/);
+		let proxyHostname = parsedProxy ? parsedProxy[1] : proxy;
+		const proxyPort = parsedProxy ? Number.parseInt(parsedProxy[2]!, 10) : 0;
+		if (proxyPort && proxyPort !== port) {
+			return true;
+		}
+
+		if (!/^[.*]/.test(proxyHostname)) {
+			return hostname !== proxyHostname;
+		}
+
+		if (proxyHostname.startsWith("*")) {
+			proxyHostname = proxyHostname.slice(1);
+		}
+		return !hostname.endsWith(proxyHostname);
+	});
+}
+
+function getProxyForUrl(targetUrl: string | URL, env?: ProviderEnv): string {
+	const parsedUrl = parseProxyTargetUrl(targetUrl);
+	if (!parsedUrl?.protocol || !parsedUrl.host) {
+		return "";
+	}
+
+	const protocol = parsedUrl.protocol.split(":", 1)[0]!;
+	const hostname = parsedUrl.host.replace(/:\d*$/, "");
+	const port = Number.parseInt(parsedUrl.port, 10) || DEFAULT_PROXY_PORTS[protocol] || 0;
+	if (!shouldProxyHostname(hostname, port, env)) {
+		return "";
+	}
+
+	let proxy = getProxyEnv(`${protocol}_proxy`, env) || getProxyEnv("all_proxy", env);
+	if (proxy && !proxy.includes("://")) {
+		proxy = `${protocol}://${proxy}`;
+	}
+	return proxy;
 }
 
 export const UNSUPPORTED_PROXY_PROTOCOL_MESSAGE =
 	"Unsupported proxy protocol. SOCKS and PAC proxy URLs are not supported; use an HTTP or HTTPS proxy URL.";
 
-export function resolveHttpProxyUrlForTarget(targetUrl: string | URL): URL | undefined {
-	const proxy = getProxyForUrl(targetUrl.toString());
+export function resolveHttpProxyUrlForTarget(targetUrl: string | URL, env?: ProviderEnv): URL | undefined {
+	const proxy = getProxyForUrl(targetUrl, env);
 	if (!proxy) {
 		return undefined;
 	}
@@ -35,16 +109,4 @@ export function resolveHttpProxyUrlForTarget(targetUrl: string | URL): URL | und
 	}
 
 	return proxyUrl;
-}
-
-export function createHttpProxyAgentsForTarget(targetUrl: string | URL): NodeHttpProxyAgents | undefined {
-	const proxyUrl = resolveHttpProxyUrlForTarget(targetUrl);
-	if (!proxyUrl) {
-		return undefined;
-	}
-
-	return {
-		httpAgent: new HttpProxyAgent(proxyUrl),
-		httpsAgent: new HttpsProxyAgent(proxyUrl) as unknown as HttpsAgent,
-	};
 }

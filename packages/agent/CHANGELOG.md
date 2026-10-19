@@ -2,6 +2,149 @@
 
 ## [Unreleased]
 
+## [0.80.6] - 2026-07-09
+
+### Added
+
+- Added the `max` model thinking level after `xhigh`.
+
+## [0.80.5] - 2026-07-09
+
+## [0.80.4] - 2026-07-09
+
+### Added
+
+- Added configurable harness session context entry transforms and custom-entry message projectors.
+- Added custom metadata support in JSONL session headers ([#6417](https://github.com/earendil-works/pi/pull/6417) by [@ArcadiaLin](https://github.com/ArcadiaLin)).
+- Exported `InMemorySessionStorage` and `JsonlSessionStorage` ([#6435](https://github.com/earendil-works/pi/issues/6435)).
+
+### Fixed
+
+- Fixed harness split-turn compaction to serialize summary requests so single-concurrency providers are not asked to run overlapping generations ([#5536](https://github.com/earendil-works/pi/issues/5536)).
+- Fixed harness tool calls from length-truncated assistant messages to fail instead of waiting for missing tool results ([#6285](https://github.com/earendil-works/pi/pull/6285)).
+- Fixed harness session ingestion to normalize `null` message content before context projection, avoiding crashes on lax imported transcripts ([#6343](https://github.com/earendil-works/pi/pull/6343)).
+- Fixed non-positive or oversized harness shell execution timeouts to fail with a clear validation error instead of being clamped to an immediate timeout ([#6181](https://github.com/earendil-works/pi/issues/6181)).
+- Fixed harness session storage short entry ids to use the random tail of the generated uuidv7 instead of the timestamp prefix, which was nearly constant between calls ([#6242](https://github.com/earendil-works/pi/issues/6242)).
+
+## [0.80.3] - 2026-06-30
+
+### Added
+
+- Added `prepareNextTurnWithContext` for `Agent` users that need the next-turn loop context.
+
+### Fixed
+
+- Fixed `Agent.prepareNextTurn` to keep receiving the run abort signal instead of the next-turn context.
+
+## [0.80.2] - 2026-06-23
+
+### Changed
+
+- Renamed the public harness shell execution options type from `ExecutionEnvExecOptions` to `ShellExecOptions`.
+
+## [0.80.1] - 2026-06-23
+
+## [0.80.0] - 2026-06-23
+
+### Breaking Changes
+
+- `AgentHarnessOptions.models` is required and is the only auth path: the harness streams turns, compaction, and branch summarization through the provided `Models` instance (`models.streamSimple()`/`completeSimple()`), resolving auth through the providers. `AgentHarnessOptions.getApiKeyAndHeaders` is removed — apps that resolved keys per request now express that as provider auth (`ApiKeyAuth`/`OAuthAuth`) on the providers in the `Models` collection. Build one with `createModels()` + provider factories (or `builtinModels()` from `@earendil-works/pi-ai/providers/all`); tests use `fauxProvider()`.
+- `compact()`, `generateSummary()`, and `generateBranchSummary()` take a `Models` parameter and no longer accept explicit `apiKey`/`headers`.
+- `StreamFn` is defined structurally (`(model, context, options?) => AssistantMessageEventStream | Promise<...>`); `Models.streamSimple` satisfies it.
+- Removed the `@earendil-works/pi-agent-core/base` selective-provider entrypoint; use the root package with an explicit `Models` instance instead.
+
+### Fixed
+
+- Fixed harness session names to normalize newline characters before storing labels ([#5999](https://github.com/earendil-works/pi/pull/5999) by [@haoqixu](https://github.com/haoqixu)).
+- Fixed harness compaction estimates to ignore malformed all-zero assistant usage after truncated responses ([#5526](https://github.com/earendil-works/pi/pull/5526) by [@dmmulroy](https://github.com/dmmulroy)).
+
+## [0.79.10] - 2026-06-22
+
+## [0.79.9] - 2026-06-20
+
+### Fixed
+
+- Fixed Node execution environment commands through legacy WSL `bash.exe` to pass scripts over stdin so shell variables expand in the target bash ([#5893](https://github.com/earendil-works/pi/issues/5893)).
+
+## [0.79.8] - 2026-06-19
+
+### Added
+
+- Added `@earendil-works/pi-agent-core/base` for bundlers that want to pair the agent core with selective `@earendil-works/pi-ai/base` provider registration ([#5348](https://github.com/earendil-works/pi/pull/5348) by [@FredKSchott](https://github.com/FredKSchott)).
+
+## [0.79.7] - 2026-06-18
+
+## [0.79.6] - 2026-06-16
+
+## [0.79.5] - 2026-06-16
+
+## [0.79.4] - 2026-06-15
+
+## [0.79.3] - 2026-06-13
+
+## [0.79.2] - 2026-06-12
+
+### Fixed
+
+- Fixed late tool progress callbacks after tool settlement to be ignored instead of emitting stale `tool_execution_update` events ([#5573](https://github.com/earendil-works/pi/issues/5573)).
+
+## [0.79.1] - 2026-06-09
+
+## [0.79.0] - 2026-06-08
+
+### Fixed
+
+- Fixed the compaction summarization system prompt to use neutral AI assistant wording for non-coding agents ([#5401](https://github.com/earendil-works/pi/issues/5401)).
+
+## [0.78.1] - 2026-06-04
+
+## [0.78.0] - 2026-05-29
+
+## [0.77.0] - 2026-05-28
+
+### Breaking Changes
+
+- Renamed agent harness `model_select` and `thinking_level_select` events to `model_update` and `thinking_level_update`.
+
+### Added
+
+- Added agent harness tool registry APIs, `tools_update` events, branch-scoped active-tool persistence, and duplicate tool validation.
+
+## [0.76.0] - 2026-05-27
+
+### Fixed
+
+- Fixed context token estimates to count user image attachments consistently with tool result images ([#4983](https://github.com/earendil-works/pi/issues/4983)).
+
+## [0.75.5] - 2026-05-23
+
+## [0.75.4] - 2026-05-20
+
+### Changed
+
+- Changed source syntax to avoid TypeScript constructs that require JavaScript emit, keeping the package compatible with Node.js strip-only TypeScript checks.
+- Removed the package-level development watch script now that the root TypeScript check validates strip-only-compatible sources.
+
+### Fixed
+
+- Fixed tool-call preflight to stop preparing sibling tool calls after the run is aborted ([#4276](https://github.com/earendil-works/pi/issues/4276)).
+- Fixed tail truncation for oversized single-line output that ends with a trailing newline ([#4715](https://github.com/earendil-works/pi/issues/4715)).
+- Fixed Windows Node execution environment command spawns to hide helper console windows from background processes ([#4699](https://github.com/earendil-works/pi/issues/4699)).
+
+## [0.75.3] - 2026-05-18
+
+## [0.75.2] - 2026-05-18
+
+## [0.75.1] - 2026-05-18
+
+## [0.75.0] - 2026-05-17
+
+### Breaking Changes
+
+- Raised the minimum supported Node.js version to 22.19.0.
+
+## [0.74.1] - 2026-05-16
+
 ## [0.74.0] - 2026-05-07
 
 ## [0.73.1] - 2026-05-07

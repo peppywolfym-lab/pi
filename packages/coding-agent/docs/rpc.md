@@ -13,6 +13,7 @@ pi --mode rpc [options]
 Common options:
 - `--provider <name>`: Set the LLM provider (anthropic, openai, google, etc.)
 - `--model <pattern>`: Model pattern or ID (supports `provider/id` and optional `:<thinking>`)
+- `--name <name>` / `-n <name>`: Set the session display name at startup
 - `--no-session`: Disable session persistence
 - `--session-dir <path>`: Custom session storage directory
 
@@ -285,9 +286,9 @@ Set the reasoning/thinking level for models that support it.
 {"type": "set_thinking_level", "level": "high"}
 ```
 
-Levels: `"off"`, `"minimal"`, `"low"`, `"medium"`, `"high"`, `"xhigh"`
+Levels: `"off"`, `"minimal"`, `"low"`, `"medium"`, `"high"`, `"xhigh"`, `"max"`
 
-Note: `"xhigh"` is only supported by OpenAI codex-max models.
+`"xhigh"` and `"max"` are exposed only when supported by the selected model. Some models, including GPT-5.6, expose both.
 
 Response:
 ```json
@@ -373,10 +374,13 @@ Response:
     "summary": "Summary of conversation...",
     "firstKeptEntryId": "abc123",
     "tokensBefore": 150000,
+    "estimatedTokensAfter": 32000,
     "details": {}
   }
 }
 ```
+
+`estimatedTokensAfter` is a heuristic estimate over the rebuilt message context immediately after compaction, not a provider-exact token count.
 
 #### set_auto_compaction
 
@@ -657,6 +661,64 @@ Response:
 }
 ```
 
+#### get_entries
+
+Get all session entries in append order (excluding the session header). The session is an append-only tree of entries with stable ids, so an entry id works as a durable cursor: pass the last entry id you have seen as `since` to get only entries strictly after it, even across client restarts. Unlike `get_messages`, this includes pre-compaction history and abandoned branches.
+
+```json
+{"type": "get_entries"}
+```
+
+With a cursor:
+```json
+{"type": "get_entries", "since": "abc123"}
+```
+
+Response:
+```json
+{
+  "type": "response",
+  "command": "get_entries",
+  "success": true,
+  "data": {
+    "entries": [
+      {"type": "message", "id": "def456", "parentId": "abc123", "timestamp": "...", "message": {"role": "user", "...": "..."}}
+    ],
+    "leafId": "def456"
+  }
+}
+```
+
+`leafId` is the id of the current leaf entry (`null` for an empty session), so a client can tell in one round trip whether the active branch moved. If `since` does not match any entry id, the response is `success: false`.
+
+#### get_tree
+
+Get the session as a tree of entries. Each node is `{entry, children, label?, labelTimestamp?}`. A well-formed session has a single root; orphaned entries (broken parent chain) also appear as roots.
+
+```json
+{"type": "get_tree"}
+```
+
+Response:
+```json
+{
+  "type": "response",
+  "command": "get_tree",
+  "success": true,
+  "data": {
+    "tree": [
+      {
+        "entry": {"type": "message", "id": "abc123", "parentId": null, "...": "..."},
+        "children": [
+          {"entry": {"type": "message", "id": "def456", "parentId": "abc123", "...": "..."}, "children": []}
+        ]
+      }
+    ],
+    "leafId": "def456"
+  }
+}
+```
+
 #### get_last_assistant_text
 
 Get the text content of the last assistant message.
@@ -694,7 +756,7 @@ Response:
 }
 ```
 
-The current session name is available via `get_state` in the `sessionName` field.
+The current session name is available via `get_state` in the `sessionName` field. To set the initial name when starting RPC mode, pass `--name <name>` or `-n <name>` to the `pi --mode rpc` process.
 
 ### Commands
 
@@ -746,7 +808,8 @@ Events are streamed to stdout as JSON lines during agent operation. Events do NO
 | Event | Description |
 |-------|-------------|
 | `agent_start` | Agent begins processing |
-| `agent_end` | Agent completes (includes all generated messages) |
+| `agent_end` | One low-level agent run completes (may still be followed by retry, compaction, or queued continuations) |
+| `agent_settled` | Agent run is fully settled; no automatic retry, compaction retry, or queued continuation remains |
 | `turn_start` | New turn begins |
 | `turn_end` | Turn completes (includes assistant message and tool results) |
 | `message_start` | Message begins |
@@ -772,13 +835,22 @@ Emitted when the agent begins processing a prompt.
 
 ### agent_end
 
-Emitted when the agent completes. Contains all messages generated during this run.
+Emitted when one low-level agent run completes. Contains all messages generated during this run. If `willRetry` is true, an automatic retry will follow.
 
 ```json
 {
   "type": "agent_end",
-  "messages": [...]
+  "messages": [...],
+  "willRetry": false
 }
+```
+
+### agent_settled
+
+Emitted after the full session-level run settles. At this point Pi will not continue automatically through retry, compaction retry, or queued follow-up messages.
+
+```json
+{"type": "agent_settled"}
 ```
 
 ### turn_start / turn_end
@@ -923,6 +995,7 @@ The `reason` field is `"manual"`, `"threshold"`, or `"overflow"`.
     "summary": "Summary of conversation...",
     "firstKeptEntryId": "abc123",
     "tokensBefore": 150000,
+    "estimatedTokensAfter": 32000,
     "details": {}
   },
   "aborted": false,
@@ -1002,7 +1075,7 @@ Some `ExtensionUIContext` methods are not supported or degraded in RPC mode beca
 - `getTheme()` returns `undefined`
 - `setTheme()` returns `{ success: false, error: "..." }`
 
-Note: `ctx.hasUI` is `true` in RPC mode because the dialog and fire-and-forget methods are functional via the extension UI sub-protocol.
+Note: `ctx.mode` is `"rpc"` and `ctx.hasUI` is `true` in RPC mode because the dialog and fire-and-forget methods are functional via the extension UI sub-protocol. Use `ctx.mode === "tui"` to guard TUI-specific features like `custom()` that require a real terminal.
 
 ### Extension UI Requests (stdout)
 

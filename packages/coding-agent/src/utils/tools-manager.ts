@@ -5,7 +5,7 @@ import { arch, platform } from "os";
 import { join } from "path";
 import { Readable } from "stream";
 import { pipeline } from "stream/promises";
-import { APP_NAME, getBinDir } from "../config.js";
+import { APP_NAME, getBinDir } from "../config.ts";
 
 const TOOLS_DIR = getBinDir();
 const NETWORK_TIMEOUT_MS = 10_000;
@@ -246,7 +246,10 @@ async function downloadTool(tool: "fd" | "rg"): Promise<string> {
 	const architecture = arch();
 
 	// Get latest version
-	const version = await getLatestVersion(config.repo);
+	let version = await getLatestVersion(config.repo);
+	if (tool === "fd" && plat === "darwin" && architecture === "x64") {
+		version = "10.3.0";
+	}
 
 	// Get asset name for this platform
 	const assetName = config.getAssetName(version, plat, architecture);
