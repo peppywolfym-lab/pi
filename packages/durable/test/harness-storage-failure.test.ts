@@ -497,7 +497,7 @@ describe("listener and report errors", () => {
 		);
 		const watch = await root.watch(context);
 		const seen: unknown[] = [];
-		watch.start(async (value) => {
+		watch.start(async ({ value }) => {
 			seen.push(value);
 		});
 		await root.commit((tx) => tx.appendEntry(root.id, { kind: "note" }), context);

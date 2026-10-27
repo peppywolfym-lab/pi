@@ -7,7 +7,6 @@ import { Type } from "@earendil-works/pi-ai";
 import { createModels } from "@earendil-works/pi-ai/models";
 import { fauxAssistantMessage, fauxProvider, fauxText, fauxToolCall } from "@earendil-works/pi-ai/providers/faux";
 import {
-	type AgentEvent,
 	createRegistry,
 	defineExtension,
 	defineTool,
@@ -63,7 +62,7 @@ console.log(
 	view.value.entries.map((entry) => entry.kind),
 );
 console.log("view tool slot:", live.tools?.[0]?.status, JSON.stringify(live.tools?.[0]?.output));
-view.start(async (value) => {
+view.start(async ({ value }) => {
 	const slot = (value.docs["pi.live"] as LiveState).tools?.[0];
 	if (slot?.status === "running") console.log("view output now:", JSON.stringify(slot.output));
 });
@@ -75,7 +74,7 @@ console.log(
 	stream.snapshot.tools.map((slot) => `${slot.name} ${slot.status}`),
 );
 let output = stream.snapshot.tools[0]?.output ?? "";
-stream.start(async (events: readonly AgentEvent[]) => {
+stream.start(async ({ value: events }) => {
 	for (const event of events) {
 		if (event.type === "tool_execution_update" && event.output !== undefined) {
 			output =

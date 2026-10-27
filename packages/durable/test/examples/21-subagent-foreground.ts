@@ -114,7 +114,7 @@ const attached = new Set<ConversationId>();
 const attach = async (id: ConversationId, indent: string): Promise<void> => {
 	attached.add(id);
 	const stream = await watchEvents(harness, id, context);
-	stream.start(async (events) => {
+	stream.start(async ({ value: events }) => {
 		for (const event of events) {
 			print(indent, event);
 			if (event.type !== "tool_execution_update") continue;

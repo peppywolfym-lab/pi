@@ -1,8 +1,17 @@
-import { type Context, type JsonValue, Watch, type WatchHandle } from "@earendil-works/chord";
+import { type Context, type JsonValue, Watch, type WatchChange, type WatchHandle } from "@earendil-works/chord";
 import { BACKGROUND_CONTEXT, withoutAbortSignal } from "@earendil-works/chord/context";
 import { applyImmutable, type Op } from "@earendil-works/chord/delta";
-import { contained, type ObservedCommit, type SessionImpl } from "../session/session.ts";
-import type { ConversationId, JoinPolicy, Storage, TaskId, TaskOutcome, TaskRecord } from "../types.ts";
+import { contained, guardObserver, type ObservedCommit, observation, type SessionImpl } from "../session/session.ts";
+import type {
+	ConversationId,
+	JoinPolicy,
+	Observation,
+	Observer,
+	Storage,
+	TaskId,
+	TaskOutcome,
+	TaskRecord,
+} from "../types.ts";
 import { type BlockedReason, type BlockedSubject, blockedSubject } from "./scheduler.ts";
 import { closedError, scanAll } from "./util.ts";
 
@@ -47,10 +56,10 @@ export type TaskGraph = {
 export type TaskGraphWatch = WatchHandle<TaskGraph>;
 
 type AnyTaskRecord = TaskRecord<JsonValue, JsonValue, JsonValue>;
-type Observer = Watch<TaskGraph>;
 type Mount = {
 	value: TaskGraph;
-	readonly observers: Set<Observer>;
+	/** Watches and guarded host observers (`observeTaskGraph()`). */
+	readonly observers: Set<Observer<TaskGraph>>;
 	/** What the blocked reason reads of each live task, so a registry change can derive it again without payloads. */
 	readonly records: Map<string, BlockedSubject>;
 };
@@ -97,7 +106,25 @@ export class TaskGraphView {
 		});
 	}
 
-	/** A serialized watch of the graph; cancelling `context` stops it. */
+	/**
+	 * Attach a synchronous observer of the graph (`Harness.observeTaskGraph()`), behind `guardObserver()`; `context`
+	 * governs only the attachment.
+	 */
+	async observe(observer: Observer<TaskGraph>, context: Context): Promise<Observation<TaskGraph>> {
+		let value!: TaskGraph;
+		const attached = await this.#attach((current, release) => {
+			value = current;
+			return guardObserver(observer, release, (error) => this.#session.report(error));
+		}, context);
+		const signal = context.abortSignal;
+		if (signal?.aborted) {
+			attached.detach();
+			throw signal.reason;
+		}
+		return observation(value, attached.observer);
+	}
+
+	/** A serialized watch of the graph, an observer of its mount; cancelling `context` stops it. */
 	async watch(context: Context): Promise<TaskGraphWatch> {
 		const { observer } = await this.#attach(
 			(value, release) => new Watch<TaskGraph>(value, release, (error) => this.#session.report(error)),
@@ -113,12 +140,12 @@ export class TaskGraphView {
 	}
 
 	/** Register an observer created from the current revision, atomically on the Session line. */
-	#attach<O extends Observer>(
+	#attach<O extends Observer<TaskGraph>>(
 		create: (value: TaskGraph, release: () => void) => O,
 		context: Context,
 	): Promise<{ observer: O; detach: () => void }> {
 		return this.#session.readOnLine(async () => {
-			const mount = this.#mount ?? { ...(await this.#build(context)), observers: new Set<Observer>() };
+			const mount = this.#mount ?? { ...(await this.#build(context)), observers: new Set<Observer<TaskGraph>>() };
 			const detach = (): void => {
 				mount.observers.delete(observer);
 				if (mount.observers.size === 0 && this.#mount === mount) this.#mount = undefined;
@@ -232,8 +259,8 @@ function publish(mount: Mount, ops: Op[], context: Context, report: (error: unkn
 	if (ops.length === 0) return;
 	mount.value = applyImmutable(mount.value, ops);
 	const frameContext = withoutAbortSignal(context);
-	for (const observer of [...mount.observers])
-		contained(() => observer.advance(mount.value, ops, frameContext), report);
+	const change: WatchChange<TaskGraph> = { value: mount.value, ops, retired: false };
+	for (const observer of [...mount.observers]) contained(() => observer.advance(change, frameContext), report);
 }
 
 function nodeOf(

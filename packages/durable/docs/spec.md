@@ -64,10 +64,11 @@ The core rule is:
 Required invariants:
 
 1. One Session commit is atomic across all record and document writes.
-2. A document update is published only after its storage commit succeeds,
-   except a deferred commit's (section 4.1): it is published to watches and the
-   conversation view when memory adopts it, and to `subscribeCommits()` once it
-   is stored.
+2. A stored commit is published once Storage made it durable, when Storage
+   adopts it (section 4), also when `Storage.commit()` then rejects; a commit
+   that fails before it is durable publishes nothing. A deferred commit
+   (section 4.1) is published to watches and the conversation view when memory
+   adopts it, and to `subscribeCommits()` once it is stored.
 3. All visible progress is durable, except what a deferred commit holds: what
    watches see can be ahead of Storage by up to that commit's window
    (`withinMs`), and a crash loses it. A commit is deferred only when its caller
@@ -81,9 +82,13 @@ Required invariants:
    Values assigned into a draft are copied by value and must be strict JSON.
 7. The mutation line remains held through storage settlement and committed-state
    adoption. Commit/close observers run synchronously only to capture immutable
-   state; document-state and watch user callbacks run later, off the line.
-8. A storage error is fatal to the open Session (section 10.1). It publishes
-   nothing and must be reopened. Preparation and checkpoint failures occur before
+   state; document-state and watch user callbacks run later, as microtasks the
+   line never waits for, and never inside Storage's synchronous `adopt`. With a
+   storage that works after `adopt` (JSONL), they may run while the line is
+   still held by the commit that published.
+8. A storage error is fatal to the open Session (section 10.1), which must be
+   reopened. A commit it fails publishes nothing, unless Storage had already
+   made it durable and adopted it. Preparation and checkpoint failures occur before
    storage admission and roll back normally.
 
 ## 2. Core records
@@ -397,7 +402,8 @@ type HarnessOptions<Tool extends ToolRegistration = ToolRegistration> = {
   ) => (() => void) | undefined;
   /**
    * Replaces the timer for sleeping tasks (section 5.6): called with `Harness.wake()` after open and whenever it
-   * changes, off the Session line; the host arms its own wakeup and calls `resume()` when it fires.
+   * changes, in a microtask after the commit that changed it was adopted; the host arms its own wakeup and calls
+   * `resume()` when it fires.
    */
   readonly onWake?: (wake: Wake) => void;
   /**
@@ -607,7 +613,7 @@ type Wake = { readonly active: boolean; readonly at?: number };
 
 /** What a report is about (section 10.1). */
 type ReportTask = { readonly id: TaskId; readonly kind: string; readonly conversationId: ConversationId };
-type HostCallback = "now" | "settings" | "registry" | "env" | "models" | "setTimer" | "onWake";
+type HostCallback = "now" | "settings" | "registry" | "env" | "models" | "setTimer" | "onWake" | "telemetry";
 type ReportInfo =
   | { readonly type: "session_failed" }
   | {
@@ -712,6 +718,9 @@ interface Harness extends Session {
   usage(context: Context): Promise<UsageState>;
   /** Live tasks as a structural view (section 9.5), as a watch. */
   watchTaskGraph(context: Context): Promise<TaskGraphWatch>;
+  /** Synchronous observers of a conversation view and of the task graph, for adapters (section 9.1). */
+  observeConversation(id: ConversationId, observer: Observer<ConversationView>, context: Context): Promise<Observation<ConversationView>>;
+  observeTaskGraph(observer: Observer<TaskGraph>, context: Context): Promise<Observation<TaskGraph>>;
 }
 
 declare const Harness: {
@@ -1320,6 +1329,14 @@ interface Session extends DocumentObserver {
 
   snapshotAsOf<T extends JsonObject>(token: RewindableConversationDocToken<T>, conversationId: ConversationId, at: EntryId, context: Context): Promise<Readonly<T> | undefined>;
   snapshotAsOf<T extends JsonObject, I extends JsonValue>(token: RewindableConversationDocFamilyToken<T, I>, conversationId: ConversationId, key: string, at: EntryId, context: Context): Promise<Readonly<T> | undefined>;
+
+  /** A synchronous observer of one document address, for adapters (section 9.1); the scope arguments as for `snapshot()`. */
+  observeDoc<T extends JsonObject>(token: SessionDocToken<T>, observer: Observer<Readonly<T>>, context: Context): Promise<Observation<Readonly<T>> | undefined>;
+  observeDoc<T extends JsonObject>(token: ConversationDocToken<T>, conversationId: ConversationId, observer: Observer<Readonly<T>>, context: Context): Promise<Observation<Readonly<T>> | undefined>;
+  observeDoc<T extends JsonObject>(token: TaskDocToken<T>, taskId: TaskId, observer: Observer<Readonly<T>>, context: Context): Promise<Observation<Readonly<T>> | undefined>;
+  observeDoc<T extends JsonObject, I extends JsonValue>(token: SessionDocFamilyToken<T, I>, key: string, observer: Observer<Readonly<T>>, context: Context): Promise<Observation<Readonly<T>> | undefined>;
+  observeDoc<T extends JsonObject, I extends JsonValue>(token: ConversationDocFamilyToken<T, I>, conversationId: ConversationId, key: string, observer: Observer<Readonly<T>>, context: Context): Promise<Observation<Readonly<T>> | undefined>;
+  observeDoc<T extends JsonObject, I extends JsonValue>(token: TaskDocFamilyToken<T, I>, taskId: TaskId, key: string, observer: Observer<Readonly<T>>, context: Context): Promise<Observation<Readonly<T>> | undefined>;
 }
 
 interface Tx {
@@ -1505,11 +1522,17 @@ commit deferred and holdable (section 4.1)
   release the line; invoke listeners later
 otherwise, right before Storage admission
   take the held ops of every document the commit acquired and put them in front of its own
-storage succeeds
-  adopt every prepared change by pointer swap and enqueue immutable revision/ops publication
-  commit listeners, including conversation view mounts (section 9.3), capture it synchronously
-  release the line; invoke listeners later
-storage fails
+storage makes it durable and calls adopt(seq), inside Storage.commit() (section 4)
+  adopt every prepared change by pointer swap; record its telemetry events
+  queue one microtask that calls subscribeCommits() listeners with what was stored
+  the Session's own observers, including watches and view mounts (section 9.3), capture it
+    synchronously; the waits they resolve and the aborts they queue run after that microtask
+storage resolves
+  fail the Session if an own observer threw (the commit stands); release the line
+storage rejects after adopt(seq)
+  the commit stays adopted and published; the storage error fails the Session (section 10.1),
+    and an own observer's throw is reported
+storage fails before adopt(seq)
   abort every prepared change, fail the Session (section 10.1), and publish nothing
 ```
 
@@ -1721,24 +1744,67 @@ sets them for a plain Session; the Harness reads its settings at each use.
 
 A Session commit callback may be asynchronous. It owns the Session mutation
 line through callback execution, preparation, storage settlement, committed
-baseline adoption, and publication enqueue. Adoption runs inside
+baseline adoption, and publication. Adoption runs inside
 `Storage.commit()`: the Session passes an `adopt(seq)` callback, which the
 storage calls synchronously once the batch is durable and before its next
 commit (section 10), so memory always shows a complete prefix of the log, plus
-what deferred commits hold (section 4.1). The callback keeps its own error: a failed adoption fails the Session once
-`Storage.commit()` returns. A commit that rejects after its adoption fails the
-Session too, and its adopted changes stay adopted. Commit observers run on the
-line; watch listeners run later.
-External model, process, tool, network, and human effects run outside it.
-`subscribeCommits()` observes stored commits synchronously on the line after
-adoption, each with exactly what that storage transaction stored (section 4.1). `subscribeClose()` observes close synchronously when it
+what deferred commits hold (section 4.1). External model, process, tool,
+network, and human effects run outside the line.
+
+The commit is published when it is adopted, so every view changes in the same
+step as memory. Inside `adopt`, after the trackers, come the commit's telemetry
+events (`pi.durable.entry`, `pi.durable.submission`), then the Session's own
+observers, synchronously: document watches, conversation view mounts, the task
+graph, the scheduler, and submission waits, with the observers adapters attach
+(`observeDoc()`, `observeConversation()`, `observeTaskGraph()`, section 9.1). They
+advance watches and resolve waits, but run no task code: the abort signal of a task the commit newly marks
+follows in a microtask. Host `subscribeCommits()` listeners run one microtask
+after `adopt`, outside the storage's synchronous step, before every wait the
+commit resolves and every abort it queues: those continuations are queued by
+the own observers, after the dispatch. There is no order between host listeners
+and watch listeners, nor `onWake`: they are independent observers of the
+commit, and a watch delivery already queued for an earlier frame may deliver
+this commit first. The host listeners run before the Session sees
+`Storage.commit()` resolve, while the line is still held. A storage that works
+after `adopt` before it resolves, as JSONL does when it reclaims sidecars, runs
+what the commit wakes during that work too; its next commit still waits.
+
+```text
+adopt(41): trackers, telemetry events, own observers (views advance, waits resolve)
+microtask: subscribeCommits() listeners
+microtasks after it: wait continuations, abort listeners
+microtasks, in no order relative to the above: watch listeners, onWake
+Storage.commit() resolves; session.commit() resolves
+```
+
+`adopt` never throws. A throwing telemetry adapter is reported (`host_error`,
+callback `telemetry`; a plain Session drops it, as it drops every report) and
+the commit resolves; a host listener's throw is reported (section 10.1), and an
+adapter's observer that throws is also detached and ended (section 9.1). The
+first throw of an own observer is kept, the other observers and the host
+listeners still get the commit, and it fails the Session once
+`Storage.commit()` returned; the commit stands and resolves. A throw while
+memory adopts the batch is different: nothing is published, the Session fails
+once `Storage.commit()` returned, and the commit rejects with that error. A
+commit that Storage rejects after its adoption is durable: it stays adopted and
+published, waits it resolved stay resolved, the commit rejects with the storage
+error, and the Session fails with it; an own observer's throw in that commit is
+then reported as a `listener_error`.
+
+`subscribeCommits()` observes stored commits in one synchronous call per
+listener, on the line, each with exactly what that storage transaction stored (section 4.1). Adoption
+queues the one dispatch of a commit only when a listener is registered; the
+dispatch calls the listeners registered when it runs. So a listener added
+between `adopt` and the dispatch gets the commit only when some listener was
+registered at `adopt`; one removed in between does not get it; one added after
+the dispatch ran misses it. `subscribeClose()` observes close synchronously when it
 begins, after admission is sealed, also when a failure closes the Session; the
 Harness ends waits, watches, and streams there, and signals task invocations
 after every close listener has run, so what a task holds ends with the Session's
 reason rather than as cancelled. Both return idempotent
 disposers; their listeners must not block or call Session APIs, and one that
 throws is reported without affecting the others (section 10.1). Watch listeners
-still run later, off the line.
+still run later, as microtasks the line never waits for (invariant 7).
 
 ```ts
 await session.commit(async tx => {
@@ -1834,10 +1900,13 @@ A failed Session stores nothing; after a reopen nothing is held.
 Publication: the Session's own observers see each held commit once, when memory
 adopts it, and of a normal commit that stores held changes only its own
 operations. `subscribeCommits()` sees every storage transaction with exactly
-what it stored: nothing for a held commit, and the stored operations, held
-first, for a commit or a deadline that stores them. A consumer that applies
+what it stored, published when Storage adopts it (section 4): nothing for a
+held commit, and the stored operations, held first, for a commit or a deadline
+that stores them. A document the commit retires is published as its retirement
+only: the held operations and the commit's own change stored before the
+retirement are not. A consumer that applies
 `subscribeCommits()` publications to stored state, such as a replica, stays
-equal to Storage. Its `seq` values have gaps where nothing was published.
+equal to Storage in every live document. Its `seq` values have gaps where nothing was published.
 
 Consistency: every stored document is a state it had in memory, and a normal
 commit that reads a held document through `tx` stores it with whatever it
@@ -2577,12 +2646,12 @@ paused, when the Session next needs a running process:
 Blocked tasks (section 5.4), `completing` tasks, and waits on live tasks count
 for neither; the work they wait for does. With `HarnessOptions.onWake`, the
 Harness arms no timer for sleeps. It calls `onWake` with `wake()` after open and
-whenever the value changes, off the Session line; a throw is reported. The host
+whenever the value changes, in a microtask the line never waits for; a throw is reported. The host
 arms its own wakeup and calls `resume()` when it fires, which makes due sleeps
 runnable. A host whose process can be evicted, such as a Durable Object with
 its one alarm, arms the alarm at `at`, or at `now + heartbeat` while `active`
 if that is earlier, and deletes it when neither is set. `onWake` runs after the
-commit that changes the value, so a host call that can make an idle Session
+commit that changes the value was adopted (section 4), so a host call that can make an idle Session
 active arms the recovery wakeup first: `submit()`, `compact()`, `abortTask()`,
 `Conversation.abort()`, a registry change, and `resume()` after open. An early
 wakeup is harmless; a missing one leaves work stranded. A failed alarm write
@@ -4761,23 +4830,26 @@ re-exports both):
 
 ```ts
 type WatchEnd =
-  | { readonly reason: "stopped" | "cancelled" | "retired" | "ended" }
+  | { readonly reason: "stopped" | "cancelled" | "ended" }
   | { readonly reason: "listener_error"; readonly error: Error }
   /** The source failed; for Durable, what failed the Session, usually a storage error (section 10.1). */
   | { readonly reason: "failed"; readonly error: unknown };
+
+/** One listener call: the newest value, the ops from the previous value, and a retirement since the previous call. */
+type WatchChange<T> = { readonly value: T; readonly ops: readonly Op[]; readonly retired: boolean };
 
 interface WatchHandle<T> {
   /** Acquisition revision before start; latest delivered immutable revision afterward. */
   readonly value: T;
   /** Installs the sole serialized asynchronous listener. */
-  start(listener: (value: T, ops: readonly Op[], context: Context) => Promise<void>): void;
+  start(listener: (change: WatchChange<T>, context: Context) => Promise<void>): void;
   /** Idempotently stops future callbacks and returns this watch's terminal result. */
   stop(): Promise<WatchEnd>;
   /** Settles when the watch terminates; an already-running callback remains caller-owned. */
   readonly closed: Promise<WatchEnd>;
 }
 
-type DocumentWatch<T extends JsonObject> = WatchHandle<Readonly<T> | null>;
+type DocumentWatch<T extends JsonObject> = WatchHandle<Readonly<T>>;
 
 interface DocumentObserver {
   watchDoc<T extends JsonObject>(token: SessionDocToken<T>, context: Context): Promise<DocumentWatch<T> | undefined>;
@@ -4790,15 +4862,33 @@ interface DocumentObserver {
 ```
 
 A watch ends once, with the first reason that applies: `stopped` by `stop()`;
-`cancelled` when its acquisition `Context` is cancelled; `retired` when its
-document incarnation retired; `ended` when the Session closed; `listener_error`
-when its listener threw or rejected; `failed` when the Session failed.
+`cancelled` when its acquisition `Context` is cancelled; `ended` when the owner
+of what it watches ends (the Session closed, or a task document's task became
+terminal); `listener_error` when its listener threw or rejected; `failed` when
+the Session failed.
 
-Watch acquisition never creates; absent lookup returns `undefined`. Successful
-acquisition binds one concrete incarnation. Retirement is an explicit event of
-that incarnation, never inferred from a `null` value: it delivers a JSON `null`
-root replacement `[["r", null]]` as the last frame, then ends the watch as
-`retired`. A later recreation requires acquiring a new watch.
+Watch acquisition never creates; absent lookup returns `undefined`. A document
+watch follows its address (kind, scope, and key) from the incarnation found at
+acquisition. A retirement does not end it: the next call has `retired` set,
+with the last value the watch was given and no ops (Durable has no value for an
+absent document; `null` never appears). A commit that changes a document and
+retires it publishes the retirement only, so that call carries the value from
+before the commit, not the content stored with the retirement. A document created at the address later arrives as a
+root replacement `[["r", value]]` of the new incarnation, folded with what is
+pending, so one call may report a retirement and carry the next incarnation:
+
+```text
+commit: retireDoc(StateDoc); doc(StateDoc).value = 10
+call:   { value: { value: 10, ... }, ops: [["r", { value: 10, ... }]], retired: true }
+```
+
+Task documents retire when their task becomes terminal and are never created
+again, so a task document's watch gets the retirement of that commit as its last
+call and then ends `ended`, once that call returned. Until then Session close or
+failure still ends it at once, dropping the retirement if it was not delivered
+yet, as for a watch never started. A watch of a session or conversation document that
+is retired for good stays until it is stopped, its context is cancelled, or the
+Session ends; it pins nothing while its address is absent.
 
 Session close ends every watch at its seal: the watch keeps its last value and
 receives no frame from a commit that settles during close.
@@ -4816,15 +4906,72 @@ acquisition, and every later commit is buffered until `start()`. This
 prevents a value from being paired with operations based on a newer unseen
 revision.
 
+**Observers.** Watches are for application code. Adapters that must change in
+the same step as Durable's memory, such as a Chord source over a Durable view,
+attach a synchronous observer instead; every watch is built on one:
+
+```ts
+type Observer<T> = {
+  advance(change: WatchChange<T>, context: Context): void;
+  end(failure: { readonly error: unknown } | undefined): void;
+};
+type Observation<T> = { readonly value: T; detach(): void };
+
+interface Session {
+  observeDoc<T extends JsonObject>(token: SessionDocToken<T>, observer: Observer<Readonly<T>>, context: Context): Promise<Observation<Readonly<T>> | undefined>;
+  // ... and the other five scopes (section 3.3), the observer before the context
+}
+interface Harness {
+  observeConversation(id: ConversationId, observer: Observer<ConversationView>, context: Context): Promise<Observation<ConversationView>>;
+  observeTaskGraph(observer: Observer<TaskGraph>, context: Context): Promise<Observation<TaskGraph>>;
+}
+```
+
+Attaching works like acquiring a watch, atomically on the Session line: the
+observation's `value` includes every commit before it, and `advance` gets every
+later change that a watch would get, unfolded, as memory adopts it: for a
+stored commit inside Storage's `adopt` (section 4), for a deferred one when
+memory adopts it, before it is stored (section 4.1). A commit gives a view or
+the graph at most one call, and a document observer one call per change at its
+address: a commit that retires the document and creates it again gives two, the
+retirement and then the new incarnation's `[["r", value]]`. The task graph also
+advances without a commit, when a registry change or a failed migration changes
+a task's `blocked` reason (section 9.5): that call runs on the Session line,
+outside any `adopt`, with a context of its own. A document observer follows its
+address as a document watch does, and `observeDoc()` gives `undefined` for an
+absent one. `end` comes once: when the Session closes (`undefined`) or fails
+(`{ error }`), or, for a task document, right after the retirement change of
+the commit that makes its task terminal, inside that commit's `adopt`.
+`detach()` is idempotent, and nothing follows it, not even the rest of the
+commit underway; a detached observer is referenced by nothing of the Session.
+`context` governs only the attachment: cancelling it while attaching rejects
+the attachment and leaves nothing attached; cancelling it afterwards does
+nothing, and `detach()` ends the observation.
+
+The attachment completes on the line, and the caller's continuation runs
+later, so a commit adopted in between reaches `advance` before the promise of
+`observeXXX()` resolves. Each change carries the whole new value, and its
+operations apply to the value before it, starting from `observation.value`: an
+adapter that gets a change before its observation records it, and applies it
+once it has the observation, or takes `change.value`.
+
+`advance` runs inside the storage's commit, so an observer records the change
+and returns: no awaits, no Session calls, no throws, and quick, as its time is
+part of every commit; so does `end` when a task ends. One that throws anyway is
+reported as `listener_error`, detached, and ended with the error; the commit and
+the other observers are not affected. The change object is plain data, shared by
+every observer of a view and by the watches built on it, and must not be
+mutated.
+
 ### 9.2 `watchDoc`
 
 Tasks, hooks, and tools may observe any existing document for which their code
 has a token and owner/key. There is no additional subtree permission system inside trusted
 Session code.
 
-On the Session line, `watchDoc()` resolves one existing concrete incarnation,
+On the Session line, `watchDoc()` resolves the incarnation at the address,
 captures its current immutable tracker revision in O(1), and registers for every
-later committed revision and its operation batch. It returns `undefined` when
+later committed revision at that address and its operation batch. It returns `undefined` when
 absent. Before `start()`, `watch.value` remains the acquisition revision while
 later frames buffer.
 
@@ -4833,7 +4980,7 @@ const watch = await api.watchDoc(JobOutputDoc, producerTaskId, context);
 if (watch === undefined) return;
 try {
   await initializeConsumer(watch.value, context);
-  watch.start(async (value, ops, deliveryContext) => {
+  watch.start(async ({ value, ops }, deliveryContext) => {
     await consume(value, ops, deliveryContext);
   });
 } catch (error) {
@@ -4868,10 +5015,12 @@ the trusted immutability contract. Consumers must not mutate them or retained
 descendants. The selected commit Context's values are preserved without inheriting the
 producer's cancellation. A callback owns its own asynchronous work.
 
-A watch remains bound to its original incarnation. Retirement drops what is
-pending and queues the terminal `[["r", null]]` with value `null`. After that
-callback settles, the watch closes as `retired` and never
-follows a replacement incarnation.
+A watch follows its address (section 9.1). A retirement folds into the
+pending call like any commit and sets its `retired` flag; its value is the last
+one and its operations are those still pending. A later incarnation arrives as
+`[["r", value]]`. A retirement that ends a task document's task is that watch's
+last call: it is delivered, then the watch ends `ended` once the call returned. While its address is
+absent a watch pins nothing; a new incarnation is pinned while it is watched.
 
 `stop()` is idempotent. It synchronously unregisters, discards pending frames,
 prevents another callback from starting, and returns the common terminal promise.
@@ -4904,7 +5053,9 @@ The Harness keeps at most one mount per conversation. The first `watch()` or
 event attachment builds its revision on the Session line from the
 committed active transcript and documents; the mount is dropped when its last
 observer detaches. A mount derives each next revision from the Session's
-commits as memory adopts them, like `watchDoc()`: it shows committed state,
+commits as memory adopts them, for a stored commit inside Storage's `adopt`
+(section 4) and for a held one when memory adopts it (section 4.1), like
+`watchDoc()`: it shows committed state,
 including deferred commits before they are stored (section 4.1). One publication that
 touches the conversation yields one Chord batch:
 
@@ -4929,7 +5080,9 @@ are structurally shared under the trusted immutability contract. The mount
 performs no semantic projection and owns no persistence.
 
 `Conversation.watch()` exposes the mount through the serialized watch of
-section 9.2, with folded pending commits and a full-value overflow replacement.
+section 9.2, with folded pending commits and a full-value overflow replacement;
+`Harness.observeConversation()` attaches a synchronous observer of the same mount
+(section 9.1). A view never retires, so its changes never set `retired`.
 
 ### 9.4 Agent events (experimental)
 
@@ -5014,7 +5167,8 @@ type MessageChange =
 interface AgentEventStream {
   /** The `snapshot` event at attachment. */
   readonly snapshot: Extract<AgentEvent, { type: "snapshot" }>;
-  start(listener: (events: readonly AgentEvent[], context: Context) => Promise<void>): void;
+  /** Each call's `value` is one commit's batch, or a `snapshot` after an overflow (Chord's `NativeWatchChange`). */
+  start(listener: (change: { readonly value: readonly AgentEvent[] }, context: Context) => Promise<void>): void;
   stop(): Promise<WatchEnd>;
   readonly closed: Promise<WatchEnd>;
 }
@@ -5144,6 +5298,7 @@ type TaskGraphWatch = WatchHandle<TaskGraph>;
 
 interface Harness {
   watchTaskGraph(context: Context): Promise<TaskGraphWatch>;
+  observeTaskGraph(observer: Observer<TaskGraph>, context: Context): Promise<Observation<TaskGraph>>;
 }
 ```
 
@@ -5170,19 +5325,25 @@ A UI that places it under its parent reads the conversation's owner edge from
 The Harness keeps at most one graph mount. The first `watchTaskGraph()` builds its revision on the Session line from the committed
 live tasks and the conversations they own, one owner scan per live task, and
 holds the line while it does; the mount is dropped when its last observer
-detaches. It advances from `subscribeCommits()` publications like the
-conversation view: one publication that changes a node yields one Chord batch
+detaches. It advances from the Session's stored commits as memory adopts them,
+inside Storage's `adopt` (section 4), like the conversation view: a commit that
+touches a conversation view and the graph changes both in that one step. A
+`blocked` reason that changes without a commit (a registry change, a failed
+migration) is derived again in a job on the Session line and published there,
+outside any `adopt` and any commit, with the background context. One
+publication that changes a node yields one Chord batch
 that sets or deletes `tasks[id]`, or sets a node's `conversations`. A
 publication that changes no node creates no revision. Task and conversation
 records are immutable values; a node shares nothing with them.
 
 `watchTaskGraph()` returns the mount through the serialized watch of section
-9.2. It reads only: it never enables scheduling. Close ends it at its
+9.2, and `observeTaskGraph()` attaches a synchronous observer of it (section
+9.1). Both read only: they never enable scheduling. Close ends them at its
 seal like every other watch (section 2.2).
 
 ```ts
 const graph = await harness.watchTaskGraph(context);
-graph.start(async (value) => {
+graph.start(async ({ value }) => {
   for (const node of Object.values(value.tasks)) {
     const where = node.owner === undefined ? `conversation ${node.conversationId}` : `task ${node.owner}`;
     render(`${node.id} ${node.kind} ${node.state.status} under ${where}`);
@@ -5292,7 +5453,8 @@ interface Storage {
   /**
    * Persist the batch atomically. Once it is durable, call `adopt(seq)` exactly once, synchronously and before this
    * storage's next commit starts, then resolve with `seq`; a commit that fails before the batch is durable never calls
-   * it. `adopt` must not throw.
+   * it. `adopt` adopts and publishes the batch: it runs the Session's own observers (section 4), which call no Storage
+   * method, and it never throws.
    */
   commit(writes: readonly StorageWrite[], adopt: (seq: Seq) => void, context: Context): Promise<Seq>;
   /**
@@ -5437,8 +5599,12 @@ exempt: once a batch is admitted, whether it committed is unknown.
 A commit callback that catches a failed read cannot commit afterwards: the Session
 checks its health after the callback. Adopting a committed batch in memory that
 fails also fails the Session, since memory would be behind storage; so does a
-`Storage.commit()` that resolves without adopting, or rejects after it adopted
-(the adopted changes are not rolled back).
+`Storage.commit()` that resolves without adopting, or rejects after it adopted.
+A batch Storage adopted is durable, so it is not rolled back: it was published
+at adoption (section 4), `subscribeCommits()` listeners get it and the waits it
+settles resolve; then the commit rejects with the storage error and the Session
+fails as above, with the storage error. An own observer that threw on that
+commit is reported as a `listener_error`.
 
 **The Session's own bookkeeping fails it too.** A throw in a commit the
 scheduler makes for itself (reconciliation, reservation, a fault or terminal
@@ -5448,7 +5614,9 @@ storage failure, a host callback such as a `RegistryReader` whose `snapshot()`
 throws, or a bug, and running the commit again fixes none of them. A throw in a commit
 listener of the Session's own components (scheduler, submissions, views, task
 graph, document observers) fails it as well, since their memory would fall
-behind storage; the commit itself stands.
+behind storage; the commit itself stands. Those listeners run inside Storage's
+`adopt` (section 4), so the Session fails once `Storage.commit()` returned,
+after the other observers and the `subscribeCommits()` listeners got the commit.
 
 **User code fails only its unit.** A task phase that throws ends that task
 `faulted`; a throwing `migrate` blocks it as `migration_failed`; a tool that
@@ -5461,8 +5629,12 @@ Callbacks that must not fail their caller are contained: a host
 view observer that throws, or returns a
 promise that rejects, are reported, and the others still run; a watch whose
 listener throws ends with `listener_error`. A throwing or rejecting `onReport` is
-dropped, since nothing is left to report it to. A throwing `now()` is reported
-once, and `Date.now` serves instead.
+dropped, since nothing is left to report it to, and so is a report's own
+metric or event that throws. A throwing `now()` is reported once, and
+`Date.now` serves instead. A telemetry adapter that throws on a commit's events
+or on the active-task metric is reported as `host_error` with callback
+`telemetry` (a plain Session drops it); the commit resolves, and memory and the
+views keep it.
 
 **Every report says what happened.** `onReport(error, info)` gets a
 `ReportInfo` whose `type` is one of:
@@ -5482,7 +5654,8 @@ once, and `Date.now` serves instead.
   outside a task the conversation whose agent was resolved;
 - `host_error`: a host callback, by its `HarnessOptions` name: `now`,
   `settings`, `registry`, `env`, `models` for provider calls such as cancelling
-  a deferred response, `setTimer`, or `onWake`; with the task that called it,
+  a deferred response, `setTimer`, `onWake`, or `telemetry` for a telemetry
+  adapter that threw while a commit was published; with the task that called it,
   if one did;
 - `listener_error`: a commit, close, watch, view, or document listener.
 

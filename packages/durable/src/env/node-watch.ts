@@ -3,7 +3,7 @@ import { type FSWatcher, watch as fsWatch, type Stats } from "node:fs";
 import { lstat, readdir, readFile, stat, statfs } from "node:fs/promises";
 import { dirname, relative, sep } from "node:path";
 import type { Context } from "@earendil-works/chord";
-import { FileError, type FileWatcher, type WatchChange, type WatchTarget } from "./index.ts";
+import { type FileChange, FileError, type FileWatcher, type WatchTarget } from "./index.ts";
 
 /** How `NodeExecutionEnv` watches. */
 export interface NodeWatchOptions {
@@ -138,7 +138,7 @@ function excluded(target: ResolvedTarget, name: string): boolean {
  */
 export class NodeFileWatcher implements FileWatcher {
 	readonly #targets: readonly ResolvedTarget[];
-	readonly #onChange: (change: WatchChange) => void;
+	readonly #onChange: (change: FileChange) => void;
 	readonly #pollIntervalMs: number;
 	readonly #maxDirectories: number;
 	readonly #watchers = new Map<string, Installed>();
@@ -153,7 +153,7 @@ export class NodeFileWatcher implements FileWatcher {
 
 	private constructor(
 		targets: readonly ResolvedTarget[],
-		onChange: (change: WatchChange) => void,
+		onChange: (change: FileChange) => void,
 		mode: "native" | "polling",
 		options: NodeWatchOptions,
 	) {
@@ -168,7 +168,7 @@ export class NodeFileWatcher implements FileWatcher {
 	static async open(
 		targets: readonly WatchTarget[],
 		resolvePath: (path: string) => string,
-		onChange: (change: WatchChange) => void,
+		onChange: (change: FileChange) => void,
 		options: NodeWatchOptions,
 	): Promise<NodeFileWatcher> {
 		const resolved = targets.map((target) => ({
@@ -216,7 +216,7 @@ export class NodeFileWatcher implements FileWatcher {
 		this.#watchers.clear();
 	}
 
-	#deliver(change: WatchChange): void {
+	#deliver(change: FileChange): void {
 		if (this.#closed) return;
 		try {
 			this.#onChange(change);

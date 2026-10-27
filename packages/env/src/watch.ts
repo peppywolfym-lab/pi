@@ -1,5 +1,5 @@
 import type { Context } from "@earendil-works/chord";
-import { FileError, type FileWatcher, type WatchChange, type WatchTarget } from "@earendil-works/pi-durable/env";
+import { type FileChange, FileError, type FileWatcher, type WatchTarget } from "@earendil-works/pi-durable/env";
 import { type Connection, isConnectionLost } from "./connection.ts";
 import { toFileError } from "./errors.ts";
 
@@ -23,7 +23,7 @@ const RECONNECT_MAX_MS = 30_000;
 export class RemoteWatcher implements FileWatcher {
 	readonly #connection: Connection;
 	readonly #targets: readonly WatchTarget[];
-	readonly #onChange: (change: WatchChange) => void;
+	readonly #onChange: (change: FileChange) => void;
 	readonly #options: RemoteWatchOptions;
 	#mode: "native" | "polling" = "native";
 	#closed = false;
@@ -34,7 +34,7 @@ export class RemoteWatcher implements FileWatcher {
 	private constructor(
 		connection: Connection,
 		targets: readonly WatchTarget[],
-		onChange: (change: WatchChange) => void,
+		onChange: (change: FileChange) => void,
 		options: RemoteWatchOptions,
 	) {
 		this.#connection = connection;
@@ -47,7 +47,7 @@ export class RemoteWatcher implements FileWatcher {
 	static async open(
 		connection: Connection,
 		targets: readonly WatchTarget[],
-		onChange: (change: WatchChange) => void,
+		onChange: (change: FileChange) => void,
 		options: RemoteWatchOptions = {},
 	): Promise<RemoteWatcher> {
 		const watcher = new RemoteWatcher(connection, targets, onChange, options);
@@ -67,7 +67,7 @@ export class RemoteWatcher implements FileWatcher {
 		await this.#request;
 	}
 
-	#deliver(change: WatchChange): void {
+	#deliver(change: FileChange): void {
 		if (this.#closed) return;
 		try {
 			this.#onChange(change);

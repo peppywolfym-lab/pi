@@ -2,12 +2,12 @@ import type { Context } from "@earendil-works/chord";
 import { BACKGROUND_CONTEXT, withAbortSignal } from "@earendil-works/chord/context";
 import {
 	type ExecutionEnv,
+	type FileChange,
 	type FileInfo,
 	getOrThrow,
 	type ListFilesOptions,
 	type Result,
 	type ShellOutputInfo,
-	type WatchChange,
 	type WatchTarget,
 } from "../env/index.ts";
 import type { EnvConformanceCase, EnvConformanceOptions } from "./types.ts";
@@ -63,7 +63,7 @@ async function listed(
 }
 
 /** Whether a change reports `path`: an overflow, or a reported path at or above it. */
-function covers(change: WatchChange, path: string): boolean {
+function covers(change: FileChange, path: string): boolean {
 	if ("overflow" in change) return true;
 	if (!("paths" in change)) return false;
 	return change.paths.some(
@@ -76,13 +76,13 @@ async function watching(
 	env: ExecutionEnv,
 	targets: readonly WatchTarget[],
 	run: (helpers: {
-		readonly changes: WatchChange[];
+		readonly changes: FileChange[];
 		/** Wait up to three seconds for a change, after the call, that reports `path`. */
 		expectChange(path: string, change: () => Promise<void>): Promise<void>;
 		absolute(path: string): Promise<string>;
 	}) => Promise<void>,
 ): Promise<void> {
-	const changes: WatchChange[] = [];
+	const changes: FileChange[] = [];
 	const watcher = getOrThrow(await env.watch(targets, (change) => changes.push(change), context));
 	try {
 		const absolute = async (path: string) => getOrThrow(await env.absolutePath(path, context));
@@ -384,7 +384,7 @@ export function createEnvConformance(options: EnvConformanceOptions): readonly E
 		}),
 
 		watchCase("watch stops reporting once closed", async (env) => {
-			const changes: WatchChange[] = [];
+			const changes: FileChange[] = [];
 			const watcher = getOrThrow(await env.watch([{ path: "file.txt" }], (change) => changes.push(change), context));
 			assert.ok(watcher.mode === "native" || watcher.mode === "polling", "watcher reports its mode");
 			await watcher.close(context);

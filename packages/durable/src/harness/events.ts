@@ -1,4 +1,10 @@
-import { type Context, type JsonValue, NativeWatch, type WatchEnd } from "@earendil-works/chord";
+import {
+	type Context,
+	type JsonValue,
+	NativeWatch,
+	type NativeWatchChange,
+	type WatchEnd,
+} from "@earendil-works/chord";
 import type { Op, Path } from "@earendil-works/chord/delta";
 import type { AssistantMessage, Message, Usage } from "@earendil-works/pi-ai";
 import type { ObservedCommit } from "../session/session.ts";
@@ -114,7 +120,8 @@ export type ToolEventCall = {
 export interface AgentEventStream {
 	/** The `snapshot` event at attachment. */
 	readonly snapshot: SnapshotEvent;
-	start(listener: (events: readonly AgentEvent[], context: Context) => Promise<void>): void;
+	/** Install the sole listener; each call's `value` is one commit's batch, or a `snapshot` after an overflow. */
+	start(listener: (change: NativeWatchChange<readonly AgentEvent[]>, context: Context) => Promise<void>): void;
 	stop(): Promise<WatchEnd>;
 	readonly closed: Promise<WatchEnd>;
 }

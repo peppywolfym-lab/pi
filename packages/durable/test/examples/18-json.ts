@@ -82,14 +82,14 @@ let stop: () => Promise<unknown>;
 if (mode === "events") {
 	const stream = await watchEvents(harness, root.id, context);
 	print(stream.snapshot);
-	stream.start(async (events) => {
+	stream.start(async ({ value: events }) => {
 		for (const event of events) print(event);
 	});
 	stop = () => stream.stop();
 } else {
 	const watch = await root.watch(context);
 	print({ view: watch.value });
-	watch.start(async (_value, ops) => print({ ops }));
+	watch.start(async ({ ops }) => print({ ops }));
 	stop = () => watch.stop();
 }
 

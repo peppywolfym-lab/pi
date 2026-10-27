@@ -30,6 +30,8 @@ import type {
 	EntryQuery,
 	EntryRecord,
 	JsonObject,
+	Observation,
+	Observer,
 	Page,
 	ReportInfo,
 	Session,
@@ -43,7 +45,7 @@ import type {
 	TaskState,
 	Tx,
 } from "../types.ts";
-import type { TaskGraphWatch } from "./task-graph.ts";
+import type { TaskGraph, TaskGraphWatch } from "./task-graph.ts";
 import type { UsageState } from "./usage.ts";
 import type { ConversationView } from "./view.ts";
 
@@ -661,9 +663,10 @@ export type HarnessOptions<Tool extends ToolRegistration = ToolRegistration> = {
 	 * Wakes the process for sleeping tasks instead of a `setTimer` timer. Without it, while scheduling runs, a timer that
 	 * keeps the process alive resumes sleeping tasks when they are due. With it, the Harness arms no timer for them: it
 	 * calls `onWake` after open and whenever `Harness.wake()` changes, and the host arms its own wakeup, such as a
-	 * Durable Object alarm, and calls `resume()` when it fires. Called off the Session line, after the commit that
-	 * changed the value, so a host arms a recovery wakeup before calls that can start work. It may call `wake()` and
-	 * `resume()`, and must not block. A throw is reported, and the value is offered again at the next change.
+	 * Durable Object alarm, and calls `resume()` when it fires. Called in a microtask the Session line never waits for,
+	 * after the commit that changed the value was adopted, so a host arms a recovery wakeup before calls that can start
+	 * work. It may call `wake()` and `resume()`, and must not block. A throw is reported, and the value is offered again
+	 * at the next change.
 	 */
 	readonly onWake?: (wake: Wake) => void;
 	/**
@@ -791,7 +794,10 @@ export interface Conversation {
 	 * owned, transitively, by its non-background tasks.
 	 */
 	waitForIdle(context: Context): Promise<void>;
-	/** The structural view (spec §9.3) as a serialized watch; commits made while its listener runs arrive folded. */
+	/**
+	 * The structural view (spec §9.3) as a serialized watch; commits made while its listener runs arrive folded. Built on
+	 * the same mount as `Harness.observeConversation()`.
+	 */
 	watch(context: Context): Promise<ConversationWatch>;
 }
 
@@ -854,6 +860,23 @@ export interface Harness extends Session {
 	 * made while its listener runs arrive folded.
 	 */
 	watchTaskGraph(context: Context): Promise<TaskGraphWatch>;
+	/**
+	 * Attach a synchronous `Observer` to a conversation's structural view (spec §9.3), atomically on the Session line,
+	 * for adapters: `advance` gets each next revision with its operations as memory adopts the commit, inside Storage's
+	 * `adopt` for a stored one and before it is stored for a deferred one, so it only records it. `context` governs only
+	 * the attachment.
+	 */
+	observeConversation(
+		id: ConversationId,
+		observer: Observer<ConversationView>,
+		context: Context,
+	): Promise<Observation<ConversationView>>;
+	/**
+	 * Attach a synchronous `Observer` to the task graph (spec §9.5), as `observeConversation()` does to a view. A
+	 * `blocked` reason that changes without a commit (a registry change, a failed migration) advances it on the Session
+	 * line outside any commit and `adopt`, with the background context.
+	 */
+	observeTaskGraph(observer: Observer<TaskGraph>, context: Context): Promise<Observation<TaskGraph>>;
 }
 
 /** What a hook may use: committed reads and the asking task's memos, which hooks and the task share. */

@@ -9,6 +9,7 @@ import {
 	type ExecutionEnv,
 	ExecutionError,
 	err,
+	type FileChange,
 	FileError,
 	type FileInfo,
 	type FileKind,
@@ -25,7 +26,6 @@ import {
 	StreamDecoder,
 	type TextLine,
 	type TextLineReader,
-	type WatchChange,
 	type WatchTarget,
 } from "@earendil-works/pi-durable/env";
 import { type Connection, type Json, nodePlatform, RemoteError, type RemoteInfo } from "./connection.ts";
@@ -826,7 +826,7 @@ export class RemoteExecutionEnv implements ExecutionEnv {
 
 	async watch(
 		targets: readonly WatchTarget[],
-		onChange: (change: WatchChange) => void,
+		onChange: (change: FileChange) => void,
 		context: Context,
 	): Promise<Result<FileWatcher, FileError>> {
 		const aborted = abortResult<FileWatcher>(context.abortSignal);

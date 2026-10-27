@@ -1012,7 +1012,7 @@ describe("background threshold compaction", () => {
 		chat.setup.settings.compaction = BACKGROUND;
 		const events: AgentEvent[] = [];
 		const stream = await watchEvents(chat.harness, chat.root.id, context);
-		stream.start(async (batch) => {
+		stream.start(async ({ value: batch }) => {
 			events.push(...batch);
 		});
 		chat.faux.summaries.push(failure("bad request"));
@@ -1181,7 +1181,7 @@ describe("blocking threshold compaction", () => {
 		chat.faux.summaries.push(gated(deferred(), summary(), reached));
 		const events: AgentEvent[] = [];
 		const stream = await watchEvents(chat.harness, chat.root.id, context);
-		stream.start(async (batch) => {
+		stream.start(async ({ value: batch }) => {
 			events.push(...batch);
 		});
 		const input = await chat.root.submit({ type: "input", content: text("u4", 200) }, context);
@@ -1572,7 +1572,7 @@ describe("compaction events and live status", () => {
 		chat.setup.settings.retry = { enabled: true, maxRetries: 2, baseDelayMs: 60_000 };
 		const events: AgentEvent[] = [];
 		const stream = await watchEvents(chat.harness, chat.root.id, context);
-		stream.start(async (batch) => {
+		stream.start(async ({ value: batch }) => {
 			events.push(...batch);
 		});
 		chat.faux.summaries.push(failure("overloaded"));
@@ -2033,7 +2033,7 @@ describe("compaction edge cases", () => {
 		await history(chat);
 		const events: AgentEvent[] = [];
 		const stream = await watchEvents(chat.harness, chat.root.id, context);
-		stream.start(async (batch) => {
+		stream.start(async ({ value: batch }) => {
 			events.push(...batch);
 		});
 		chat.faux.summaries.push(summary());
@@ -2052,7 +2052,7 @@ describe("compaction edge cases", () => {
 		chat.setup.settings.compaction = BACKGROUND;
 		const events: AgentEvent[][] = [];
 		const stream = await watchEvents(chat.harness, chat.root.id, context);
-		stream.start(async (batch) => {
+		stream.start(async ({ value: batch }) => {
 			events.push([...batch]);
 		});
 		// A new section makes the preparation commit append a system entry next to the compaction's status.
@@ -2358,7 +2358,7 @@ describe("blocked compaction", () => {
 		const chat = { harness, root, setup, faux: script(setup) };
 		const events: AgentEvent[] = [];
 		const stream = await watchEvents(chat.harness, chat.root.id, context);
-		stream.start(async (batch) => {
+		stream.start(async ({ value: batch }) => {
 			events.push(...batch);
 		});
 		const inspection = await chat.harness.inspect(context);

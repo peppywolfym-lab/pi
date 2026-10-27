@@ -1,7 +1,7 @@
-import { type Context, type JsonValue, Watch, type WatchHandle } from "@earendil-works/chord";
+import { type Context, type JsonValue, Watch, type WatchChange, type WatchHandle } from "@earendil-works/chord";
 import { withoutAbortSignal } from "@earendil-works/chord/context";
 import { applyImmutable, type NonEmptyPath, type Op, type Path } from "@earendil-works/chord/delta";
-import { contained, type ObservedCommit, type SessionImpl } from "../session/session.ts";
+import { contained, guardObserver, type ObservedCommit, observation, type SessionImpl } from "../session/session.ts";
 import type {
 	ConversationDocToken,
 	ConversationId,
@@ -9,6 +9,8 @@ import type {
 	DocumentId,
 	EntryRecord,
 	JsonObject,
+	Observation,
+	Observer,
 	Storage,
 } from "../types.ts";
 import { AgentDoc } from "./agent.ts";
@@ -30,7 +32,8 @@ export type ConversationView = {
 
 /** Receives each next revision of a mount, and the Session's close. */
 export type ViewObserver = {
-	advance?(value: ConversationView, ops: readonly Op[], context: Context): void;
+	/** Each next revision; one change object is shared by every observer of the mount. */
+	advance?(change: WatchChange<ConversationView>, context: Context): void;
 	/** Every publication, after the mount took it; `ops` are the mount's, possibly none. */
 	publication?(
 		before: ConversationView,
@@ -106,7 +109,33 @@ export class ConversationViews {
 		this.#session.report(error);
 	}
 
-	/** A serialized watch of the view; cancelling `context` stops it. */
+	/**
+	 * Attach a synchronous observer of the view (`Harness.observeConversation()`), behind `guardObserver()`; `context`
+	 * governs only the attachment.
+	 */
+	async observe(
+		id: ConversationId,
+		observer: Observer<ConversationView>,
+		context: Context,
+	): Promise<Observation<ConversationView>> {
+		let value!: ConversationView;
+		const attached = await this.attach(
+			id,
+			(current, release) => {
+				value = current;
+				return guardObserver(observer, release, (error) => this.report(error));
+			},
+			context,
+		);
+		const signal = context.abortSignal;
+		if (signal?.aborted) {
+			attached.detach();
+			throw signal.reason;
+		}
+		return observation(value, attached.observer);
+	}
+
+	/** A serialized watch of the view, an observer of its mount; cancelling `context` stops it. */
 	async watch(id: ConversationId, context: Context): Promise<WatchHandle<ConversationView>> {
 		const { observer } = await this.attach(
 			id,
@@ -219,8 +248,9 @@ function advance(
 	if (ops.length > 0) {
 		const value = docOps.length === 0 ? mount.value : applyImmutable(mount.value, docOps);
 		mount.value = entries === value.entries ? value : { ...value, entries };
+		const change: WatchChange<ConversationView> = { value: mount.value, ops, retired: false };
 		for (const observer of [...mount.observers]) {
-			contained(() => observer.advance?.(mount.value, ops, frameContext), report);
+			contained(() => observer.advance?.(change, frameContext), report);
 		}
 	}
 	for (const observer of [...mount.observers]) {

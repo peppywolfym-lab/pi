@@ -43,6 +43,10 @@ export class ControlledStorage extends MemoryStorage {
 	readonly commits: (readonly StorageWrite[])[] = [];
 	mintCount = 0;
 	documentReadCount = 0;
+	/** Set while `adopt` runs, the storage's synchronous step: code that sees it set runs inside `Storage.commit()`'s adopt. */
+	adopting = false;
+	/** Runs once, in the next commit's synchronous step right after `adopt` returned. */
+	afterAdopt: (() => void) | undefined;
 	#commitGate: { gate: Deferred; entered: Deferred } | undefined;
 	#findGate: { gate: Deferred; entered: Deferred } | undefined;
 	#commitFailure: Error | undefined;
@@ -97,7 +101,18 @@ export class ControlledStorage extends MemoryStorage {
 			this.#commitFailure = undefined;
 			throw failure;
 		}
-		return super.commit(writes, adopt, commitContext);
+		const step = (seq: Seq): void => {
+			this.adopting = true;
+			try {
+				adopt(seq);
+			} finally {
+				this.adopting = false;
+			}
+			const after = this.afterAdopt;
+			this.afterAdopt = undefined;
+			after?.();
+		};
+		return super.commit(writes, step, commitContext);
 	}
 
 	override mintId<I extends Id<string>>(): Promise<I> {
@@ -121,6 +136,39 @@ export class ControlledStorage extends MemoryStorage {
 			await held.gate.promise;
 		}
 		return super.findDocument(address, at, callContext);
+	}
+}
+
+/**
+ * Controlled storage whose commits resolve a macrotask after they adopted the batch, as a storage with work after
+ * durability does (JSONL reclaims sidecars): code woken inside `adopt` runs before the commit resolves. `gap` runs in
+ * that work, a macrotask after adoption, and `rejectAfterAdopt` makes a commit it matches reject there, durable and
+ * adopted, as a failed reclaim does; each fires once.
+ */
+export class LateResolvingStorage extends ControlledStorage {
+	/** Set from a commit's start until it resolves. */
+	committing = false;
+	gap: ((writes: readonly StorageWrite[]) => boolean) | undefined;
+	rejectAfterAdopt: ((writes: readonly StorageWrite[]) => boolean) | undefined;
+
+	override async commit(writes: readonly StorageWrite[], adopt: (seq: Seq) => void, commitContext: Context) {
+		this.committing = true;
+		try {
+			const seq = await super.commit(writes, adopt, commitContext);
+			await flush();
+			if (this.gap?.(writes) === true) {
+				this.gap = undefined;
+				// What the gap started runs before the commit resolves.
+				await flush();
+			}
+			if (this.rejectAfterAdopt?.(writes) === true) {
+				this.rejectAfterAdopt = undefined;
+				throw new Error("reclaim failed");
+			}
+			return seq;
+		} finally {
+			this.committing = false;
+		}
 	}
 }
 

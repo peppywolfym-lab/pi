@@ -79,7 +79,7 @@ function results(entries: Awaited<ReturnType<typeof allEntries>>): ToolResultMes
 async function collectEnds(harness: Harness, conversationId: Parameters<Harness["conversation"]>[0]) {
 	const ends: Extract<AgentEvent, { type: "tool_execution_end" }>[] = [];
 	const stream = await watchEvents(harness, conversationId, context);
-	stream.start(async (batch) => {
+	stream.start(async ({ value: batch }) => {
 		for (const event of batch) if (event.type === "tool_execution_end") ends.push(event);
 	});
 	return { ends, stop: () => stream.stop() };

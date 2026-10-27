@@ -155,14 +155,14 @@ describe("document cache retention", () => {
 		const kept = (await session.watchDoc(CounterDoc, conversationId, context))!;
 		kept.start(async () => {});
 		const seen: number[] = [];
-		watch.start(async (value) => {
-			seen.push(value?.count ?? -1);
+		watch.start(async ({ value }) => {
+			seen.push(value.count);
 		});
 		clock.now += 1_000_000;
 		await bump(session, conversationId);
 		await settleLine(session);
 		// Still cached: a read long after its retention passed loads nothing from Storage.
-		await eventually(() => seen.includes(2) && kept.value?.count === 2);
+		await eventually(() => seen.includes(2) && kept.value.count === 2);
 		const reads = storage.documentReadCount;
 		clock.now += 1_000_000;
 		await session.commit(async (tx) => {
@@ -175,7 +175,7 @@ describe("document cache retention", () => {
 		clock.now += 1_000_000;
 		await bump(session, conversationId);
 		await settleLine(session);
-		await eventually(() => kept.value?.count === 3);
+		await eventually(() => kept.value.count === 3);
 		await kept.stop();
 		clock.now += 1_000_000;
 		await session.commit(async () => {}, context);
@@ -350,22 +350,27 @@ describe("document cache retention", () => {
 		await session.close(context);
 	});
 
-	it("does not keep a replacement cached for an observer of the retired incarnation", async () => {
+	it("pins only what is at the address a watch follows: nothing while retired, then the new incarnation", async () => {
 		const { session, sizes } = open(0);
 		const conversationId = await createConversation(session);
 		await bump(session, conversationId);
 		const watch = (await session.watchDoc(CounterDoc, conversationId, context))!;
 		watch.start(async () => {});
 		await session.commit((tx) => tx.retireDoc(CounterDoc, conversationId), context);
-		expect(await watch.closed).toEqual({ reason: "retired" });
-		expect(watch.value).toBeNull();
-		await bump(session, conversationId, 5);
 		await eventually(async () => {
 			await settleLine(session);
 			return sizes().cached === 0;
 		});
-		expect(await session.snapshot(CounterDoc, conversationId, context)).toEqual({ count: 5 });
+		expect(sizes().attached).toBe(0);
+		await bump(session, conversationId, 5);
+		await settleLine(session);
+		expect(sizes()).toMatchObject({ cached: 1, attached: 1 });
+		await eventually(async () => watch.value.count === 5);
 		await watch.stop();
+		await eventually(async () => {
+			await settleLine(session);
+			return sizes().cached === 0;
+		});
 		await session.close(context);
 	});
 
@@ -531,7 +536,7 @@ describe("document cache retention", () => {
 			const { harness, root } = await openChat(new MemoryStorage(), setup);
 			const stream = await watchEvents(harness, root.id, context);
 			const events: AgentEvent[] = [];
-			stream.start(async (batch) => {
+			stream.start(async ({ value: batch }) => {
 				events.push(...batch);
 			});
 			await (await root.submit({ type: "input", content: "go" }, context)).wait(context);

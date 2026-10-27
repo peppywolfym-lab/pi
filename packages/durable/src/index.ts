@@ -1,4 +1,4 @@
-export type { WatchEnd, WatchHandle } from "@earendil-works/chord";
+export type { NativeWatchChange, WatchChange, WatchEnd, WatchHandle } from "@earendil-works/chord";
 export { defineDoc, defineDocFamily } from "./documents.ts";
 export {
 	AssistantEntry,
@@ -171,6 +171,8 @@ export type {
 	JsonObject,
 	LatestConversationSemantics,
 	NextTaskState,
+	Observation,
+	Observer,
 	Page,
 	PhaseHandler,
 	ReportFrom,

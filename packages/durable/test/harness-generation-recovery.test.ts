@@ -130,8 +130,8 @@ describe("generation recovery", () => {
 		opened.harness.resume();
 		const watch = (await opened.harness.watchDoc(LiveDoc, opened.root.id, context))!;
 		let watched: string | undefined;
-		watch.start(async (value) => {
-			watched = textOf(value?.generation?.message as Message) ?? watched;
+		watch.start(async ({ value }) => {
+			watched = textOf(value.generation?.message as Message) ?? watched;
 		});
 		const id = (await opened.root.submit({ type: "input", content: "hi" }, context)).id;
 		await waitFor(() => watched !== undefined);

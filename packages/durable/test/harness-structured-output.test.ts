@@ -165,7 +165,7 @@ describe("structured output", () => {
 		});
 		const stream = await watchEvents(harness, root.id, context);
 		const ends: NestedToolExecutionResult[] = [];
-		stream.start(async (batch) => {
+		stream.start(async ({ value: batch }) => {
 			for (const event of batch) {
 				if (event.type === "tool_execution_end" && event.parentToolCallId !== undefined) {
 					ends.push(event.result as NestedToolExecutionResult);

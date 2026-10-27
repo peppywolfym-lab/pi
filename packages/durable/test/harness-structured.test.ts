@@ -1310,7 +1310,7 @@ describe("tool rounds", () => {
 		opened = harness;
 		const stream = await watchEvents(harness, root.id, context);
 		const events: AgentEvent[] = [];
-		stream.start(async (batch) => {
+		stream.start(async ({ value: batch }) => {
 			events.push(...batch);
 		});
 		await (await root.submit({ type: "input", content: "go" }, context)).wait(context);
@@ -1761,7 +1761,7 @@ describe("tool rounds and events", () => {
 	async function listen(harness: Harness, conversation: Conversation) {
 		const stream = await watchEvents(harness, conversation.id, context);
 		const events: AgentEvent[] = [];
-		stream.start(async (batch) => {
+		stream.start(async ({ value: batch }) => {
 			events.push(...batch);
 		});
 		return { stream, events };

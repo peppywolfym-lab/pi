@@ -26,7 +26,7 @@ async function record(conversation: Conversation) {
 	const watch = await conversation.watch(context);
 	const initial = watch.value;
 	const frames: Frame[] = [];
-	watch.start(async (value, ops) => {
+	watch.start(async ({ value, ops }) => {
 		frames.push({ value, ops });
 	});
 	return { initial, frames, stop: () => watch.stop() };
@@ -236,7 +236,7 @@ describe("conversation view", () => {
 			await root.commit((tx) => tx.appendEntry(root.id, { kind: "note" }), context);
 		}
 		const frames: Frame[] = [];
-		watch.start(async (value, ops) => {
+		watch.start(async ({ value, ops }) => {
 			frames.push({ value, ops });
 		});
 		await drained();

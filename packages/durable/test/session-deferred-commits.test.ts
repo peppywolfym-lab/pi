@@ -562,8 +562,8 @@ describe("publications", () => {
 		const { session, conversationId, observed, fire } = await open();
 		const watch = (await session.watchDoc(TextDoc, conversationId, context))!;
 		const values: string[] = [];
-		watch.start(async (value) => {
-			values.push(value?.text ?? "");
+		watch.start(async ({ value }) => {
+			values.push(value.text);
 		});
 		const from = observed.length;
 		for (const text of ["a", "b", "c"]) {

@@ -265,7 +265,7 @@ describe("data-only writes", () => {
 		const { harness, root } = await openChat(new MemoryStorage(), setup);
 		const events: AgentEvent[] = [];
 		const stream = await watchEvents(harness, root.id, context);
-		stream.start(async (batch) => {
+		stream.start(async ({ value: batch }) => {
 			events.push(...batch);
 		});
 		const input = await root.submit({ type: "input", content: "a" }, context);

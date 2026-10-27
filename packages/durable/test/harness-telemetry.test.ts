@@ -11,13 +11,18 @@ import {
 	type Storage,
 	type TaskId,
 } from "@earendil-works/pi-durable";
-import { InMemoryTelemetryContext } from "@earendil-works/pi-telemetry";
+import {
+	InMemoryTelemetryContext,
+	NOOP_TELEMETRY_CONTEXT,
+	NOOP_TELEMETRY_METRICS,
+	type TelemetryContext,
+} from "@earendil-works/pi-telemetry";
 import { describe, expect, it, vi } from "vitest";
 import { createCodemodeTool } from "../src/codemode/codemode.ts";
 import { type ChatSetup, chatSetup, waitFor } from "./chat-support.ts";
 import { addHooks, addTask, addTool } from "./harness-support.ts";
-import { ControlledStorage, context } from "./session-support.ts";
-import { aborted } from "./task-support.ts";
+import { ControlledStorage, context, flush } from "./session-support.ts";
+import { aborted, openTasks } from "./task-support.ts";
 
 async function openTracked(storage: Storage, setup: ChatSetup, telemetry: InMemoryTelemetryContext) {
 	const harness = await Harness.open(
@@ -984,5 +989,86 @@ describe("Durable telemetry", () => {
 		).toContainEqual({ name: "pi.durable.replay", attributes: { "tool.name": "once" } });
 		await harness.close(context);
 		await sandbox.close();
+	});
+
+	it("reports telemetry adapters that throw while a commit is published, and the commit stands", async () => {
+		const Idle = defineTask<null, { phase: "run" }, null>({
+			name: "test.telemetry-idle",
+			version: 1,
+			initial: () => ({ phase: "run" }),
+			phases: { run: async () => {} },
+			abort: async () => {},
+		});
+		const throwingMetric = {
+			add: () => {
+				throw new Error("metrics down");
+			},
+		};
+		const telemetry: TelemetryContext = {
+			...NOOP_TELEMETRY_CONTEXT,
+			metrics: { ...NOOP_TELEMETRY_METRICS, upDownCounter: () => throwingMetric },
+		};
+		const { harness, infos } = await openTasks(new MemoryStorage(), [Idle], { telemetry });
+		const root = await harness.root(context);
+		const view = await root.watch(context);
+		const shown: (number | undefined)[] = [];
+		view.start(async ({ value }) => {
+			shown.push(value.entries.at(-1)?.id);
+		});
+		const hosts: number[] = [];
+		harness.subscribeCommits((publication) => {
+			hosts.push(publication.seq);
+		});
+		const failing = withTelemetry(
+			{
+				...NOOP_TELEMETRY_CONTEXT,
+				addEvent: () => {
+					throw new Error("telemetry down");
+				},
+			},
+			context,
+		);
+		const { entry, task } = await root.commit(async (tx) => {
+			const entry = await tx.appendEntry(root.id, { kind: "note", data: {} });
+			const task = await tx.createTask(Idle, null, { ownership: { kind: "conversation" } });
+			return { entry: entry.id, task };
+		}, failing);
+		// The entry event, then the active-task metric; the report's own event throws too and is dropped.
+		expect(infos).toEqual([
+			{ type: "host_error", callback: "telemetry" },
+			{ type: "host_error", callback: "telemetry" },
+		]);
+		expect(hosts).toHaveLength(1);
+		await flush();
+		expect(shown).toEqual([entry]);
+		expect((await harness.getTask(task, context))?.state.status).toBe("pending");
+		await view.stop();
+		await harness.close(context);
+		expect(await harness.closed).toEqual({ reason: "closed" });
+	});
+
+	it("drops a report's own metric that throws, after onReport got the report", async () => {
+		const throwingCounter = {
+			add: () => {
+				throw new Error("metrics down");
+			},
+		};
+		const telemetry: TelemetryContext = {
+			...NOOP_TELEMETRY_CONTEXT,
+			metrics: { ...NOOP_TELEMETRY_METRICS, counter: () => throwingCounter },
+		};
+		const { harness, reports, infos } = await openTasks(new MemoryStorage(), [], { telemetry });
+		const root = await harness.root(context);
+		const bug = new Error("listener bug");
+		harness.subscribeCommits(() => {
+			throw bug;
+		});
+		await root.commit((tx) => tx.appendEntry(root.id, { kind: "note", data: {} }), context);
+		// The listener runs in the commit's dispatch microtask; a throw escaping its report would be unhandled there.
+		await flush();
+		expect(reports).toEqual([bug]);
+		expect(infos).toEqual([{ type: "listener_error" }]);
+		await harness.close(context);
+		expect(await harness.closed).toEqual({ reason: "closed" });
 	});
 });

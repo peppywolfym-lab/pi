@@ -32,7 +32,7 @@ console.log("watch baseline:", notesWatch.value);
 const busy = Promise.withResolvers<void>();
 const done = Promise.withResolvers<void>();
 let calls = 0;
-notesWatch.start(async (value, ops, _deliveryContext) => {
+notesWatch.start(async ({ value, ops }, _deliveryContext) => {
 	console.log("watch update:", value, JSON.stringify(ops));
 	// The first call stays busy, as a slow consumer would, while three more commits land.
 	if (++calls === 1) await busy.promise;
